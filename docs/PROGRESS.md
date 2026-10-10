@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: a CLI entry point for the supervisor; CR-03 awaits the owner's consent
+Current CR: wire the supervisor to PostgreSQL; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -876,6 +876,34 @@ floats because they are not reproducible across platforms. It is a string now.
     max_consecutive_failures: 2 consecutive cycle(s) failed; last error:
     RuntimeError: database stopped answering. Halting rather than retrying: a loop that keeps
     running against a broken system is the state most easily mistaken for health.
+
+### 2026-10-10 - CR-09 part 12: the `tigerquant supervise` command
+
+Full evidence: `docs/evidence/cr09_supervise_cli.txt`. Closes the gap part 11 recorded: the loop
+had no way to be started.
+
+    tigerquant supervise <journal.jsonl> [--interval 30] [--iterations N] [--max-failures 3]
+                                      [--heartbeat out/supervisor.json] [--no-alerts]
+
+**It cannot trade, and there is no flag that would let it.** No broker option, no account option,
+no approval registry anywhere in the module -- the cycle only ever READS a journal and compares it
+with a database. Three tests assert the source contains no order vocabulary, imports nothing from
+`tigerquant.adapters`, and says so in `--help`. **Enforced by what is absent**, which is stronger
+than a check that could later be removed.
+
+**It says what it is.** Against an in-memory repository it is a wiring check, and the command
+prints that in its own banner rather than leaving the operator to infer it. PostgreSQL is not wired
+to it -- the single biggest remaining gap, and a wiring job rather than a design one.
+
+**Drift is reported as a success.** The output says so in words: "a SUCCESSFUL check reporting bad
+news, not a failing supervisor". And a self-halt **exits 2** rather than 0, so whatever supervises
+the supervisor can tell "stopped because it broke" from "stopped because someone asked".
+
+Live run: 3 cycles, 3 ok, 0 failed, digest emitted, heartbeat on disk carrying the cycle index.
+
+**Three rounds running, the determinism check has caught new code within seconds** -- `alert_cli.py`,
+`supervisor.py`, now `supervisor_cli.py`. Each went on the operational allow-list with its reason
+recorded rather than the rule being loosened.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

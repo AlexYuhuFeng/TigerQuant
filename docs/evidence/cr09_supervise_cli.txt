@@ -1,0 +1,107 @@
+TigerQuant CR-09 evidence (part 12) - the `tigerquant supervise` command
+Generated: see the git commit this file was added in
+
+Closes the gap part 11 recorded: "there is no `tigerquant supervise` subcommand yet, so the loop
+cannot be started from the command line." The loop now can be.
+
+===========================================================================
+1. The command
+===========================================================================
+    tigerquant supervise <journal.jsonl> [--interval 30] [--iterations N] [--max-failures 3]
+                                      [--heartbeat out/supervisor.json] [--no-alerts]
+                                      [--webhook URL] [--floor WARNING]
+
+It builds the reconciliation cycle, attaches the alert router, runs the supervisor, prints the
+report, and exits **2 on a self-halt** so whatever started the process can tell "stopped because it
+broke" from "stopped because someone asked".
+
+===========================================================================
+2. IT CANNOT TRADE, AND THERE IS NO FLAG THAT WOULD LET IT
+===========================================================================
+No broker option, no account option, no approval registry anywhere in the module. The cycle only
+ever READS a journal and compares it with a database. Three tests assert the source contains no
+`submit_order`/`place_order`/`OrderIntent`/`cancel_order`, imports nothing from
+`tigerquant.adapters`, and says SO in the `--help` text.
+
+Enforced by what is ABSENT, which is stronger than a check that could later be removed.
+
+===========================================================================
+3. Live run
+===========================================================================
+$ python -m tigerquant supervise out/sup/journal.jsonl --iterations 3 --interval 0.01
+
+    supervising out/sup/journal.jsonl
+      interval          0.01s
+      max failures      3 consecutive, then halt
+      heartbeat         out/sup/hb.json
+      cycles            3
+      database          in-memory (wiring check only; PostgreSQL is not wired to this command)
+
+      NOTE: this reconciles against an IN-MEMORY database, so it is a wiring check
+            rather than a live reconciliation. Pointing it at PostgreSQL is not
+            implemented. Stop with Ctrl-C; the last heartbeat stays on disk.
+
+    supervisor: 3 cycle(s), 3 ok, 0 failed; worst severity WARNING; stopped normally
+      digest sha256:ff041a637b4015614f9156666016a4c09cdde6681aefd2656998033572648707
+      3 cycle(s) reported a divergence. That is a SUCCESSFUL check reporting bad news, not a
+      failing supervisor.
+      monitor history: 3 check(s)
+
+    {"cycle": 3, "interval_seconds": 0.01, "last_cycle_ok": true, "phase": "idle",
+     "started_at": "...", "written_at": "..."}
+
+Exit code 0. The heartbeat carries the cycle index, which is what lets an external watchdog
+distinguish "working" from "stuck in cycle 41".
+
+===========================================================================
+4. The honesty this command is built around
+===========================================================================
+**It says it is a wiring check.** Against an in-memory repository it cannot be anything else, and
+the command prints that in its own output rather than leaving the operator to infer it from the
+flags. Pointing it at PostgreSQL is not implemented, and that is stated in the banner and in this
+file rather than implied by the command's existence.
+
+**Drift is reported as a success.** The output says so explicitly: "a SUCCESSFUL check reporting
+bad news, not a failing supervisor". Counting a correct check as a failure would halt the
+supervisor for doing its job.
+
+**A self-halt exits 2.** Exiting 0 would make a halted loop indistinguishable from a clean
+shutdown to whatever supervises the supervisor.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+909 passed
+
+$ python -m pytest tests/unit/test_supervise_cli.py -q
+15 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 99 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+`supervisor_cli.py` joins the operational wall-clock allow-list, with its reason recorded. The
+determinism check flagged it immediately on the first run, as it did for `alert_cli.py` and
+`supervisor.py` -- three rounds in a row that the control has caught new code within seconds.
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **PostgreSQL is NOT wired to this command.** It reconciles against an in-memory database, so a
+   real deployment would need `tigerquant drift`'s repository instead. This is the single biggest
+   remaining gap in CR-09's supervision story, and it is a wiring job rather than a design one.
+2. No signal handling beyond Ctrl-C. `SIGTERM` is not caught, so an orchestrator stopping the
+   process does not get a final heartbeat or a clean report.
+3. No hang detection *inside* the process. The heartbeat exists so an EXTERNAL watchdog can detect
+   a stuck cycle; nothing here reads it back and halts itself. A cycle that blocks for ever blocks
+   the supervisor for ever.
+4. Alert delivery during a supervised run is only as good as the sinks configured, and no run has
+   been done with a real webhook.
+5. Not exercised over hours. Every measurement here is seconds of wall time in a test.
+6. No daemonisation, no PID file, no service unit. It is a foreground process.

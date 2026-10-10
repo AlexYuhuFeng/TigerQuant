@@ -40,6 +40,7 @@ from tigerquant.ops.settings import (
     set_secret,
     settings_report,
 )
+from tigerquant.ops.supervisor_cli import cmd_supervise, supervise_parser
 from tigerquant.pipeline.replay import run_replay
 
 if TYPE_CHECKING:
@@ -307,6 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_settings_parsers(sub)
     _add_alerts_parsers(sub)
+    supervise_parser(sub)
     return parser
 
 
@@ -691,7 +693,11 @@ _OPERATIONAL_CLOCK_MODULES = frozenset(
         # An OPERATIONAL loop. Its whole job is to measure real elapsed time: a heartbeat is
         # meaningless without a wall clock, and an interval that came from a simulated clock
         # would not be an interval. Nothing here is replayed or journaled.
+        # An OPERATIONAL loop. Its whole job is to measure real elapsed time: a heartbeat is
+        # meaningless without a wall clock, and an interval that came from a simulated clock
+        # would not be an interval. Nothing here is replayed or journaled.
         "supervisor.py",
+        "supervisor_cli.py",
         # A CLI command a HUMAN runs on demand. "Now" is the correct instant for a synthetic
         # probe and for a reconciliation the operator asked for at this moment; neither is
         # replayed, and neither contributes a journaled event. This module was caught by the
@@ -815,6 +821,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "metrics": _cmd_metrics,
         "settings": _cmd_settings,
         "alerts": cmd_alerts,
+        "supervise": cmd_supervise,
         "verify-journal": _cmd_verify,
         "doctor": _cmd_doctor,
     }

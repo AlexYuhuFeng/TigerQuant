@@ -114,6 +114,7 @@ ignore = [
 # are entry points, so library code cannot acquire a print statement unnoticed.
 "src/tigerquant/cli.py" = ["T201"]
 "src/tigerquant/ops/alert_cli.py" = ["T201"]
+"src/tigerquant/ops/supervisor_cli.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["tigerquant"]
