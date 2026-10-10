@@ -215,11 +215,24 @@ class TigerPaperExecutionClient:
             )
             raise BrokerError(msg)
 
-        identity = self._guard.require_verified()
-        tiger_order = self._build_order(order_view, account=identity.account)
+        # Three checks immediately before the network, in increasing order of specificity, and
+        # all of them here rather than at construction, because construction happened once and
+        # this happens every time:
+        #
+        #   1. the credential still holds api.trade:write. A token can be rotated or re-scoped
+        #      under a running process, and the scope is re-read rather than trusted from the
+        #      session that was handed to __init__.
+        #   2. the broker still reports this account as PAPER. A single OAuth grant was observed
+        #      returning BOTH a live-capable and a paper account (docs/evidence/
+        #      cr02_authorization.txt), so "which account will this order hit" is a question
+        #      that has to be re-asked, not remembered.
+        #   3. the order object carries that same account. `place_order` sends order.account,
+        #      NOT config.account, so if the object disagrees nothing else will notice.
+        require_write_scope(self._session)
+        identity = self._guard.reverify_from_client(self._client)
+        self._guard.assert_verified_is_paper()
 
-        # The last line before the network. `place_order` sends order.account, so if the
-        # object does not carry the verified account, nothing else will notice.
+        tiger_order = self._build_order(order_view, account=identity.account)
         self._guard.assert_account_matches(tiger_order.account)
 
         self._submitted[client_order_id] = identity.account

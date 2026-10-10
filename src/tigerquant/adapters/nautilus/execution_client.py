@@ -43,6 +43,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from tigerquant.adapters.nautilus.compat import require_engine
+from tigerquant.core.clock import Clock, SystemClock
 from tigerquant.core.enums import (
     Mode,
     OrderSide,
@@ -288,6 +289,7 @@ def build_execution_client(
     mode: Mode,
     venue: str = "TIGER",
     client_id: str = "TIGERQUANT",
+    injected_clock: Clock | None = None,
 ) -> Any:
     """Construct the engine ``ExecutionClient``.
 
@@ -314,6 +316,9 @@ def build_execution_client(
     )
 
     clock = LiveClock()
+    # A separate, injectable clock for OUR timestamps, distinct from the engine's LiveClock:
+    # ours reach the journal and must be reproducible, the engine's is its own business.
+    our_clock: Clock = injected_clock if injected_clock is not None else SystemClock()
     msgbus = MessageBus(TraderId(f"{client_id}-001"), clock)
     cache = Cache()
     # The issuer must equal the client id: ExecutionClient._set_account_id verifies exactly
@@ -341,7 +346,19 @@ def build_execution_client(
             self._tq_approvals = approvals
             self._tq_gate = gate
             self._tq_translator = translator
+            self._tq_clock = our_clock
             self._set_account_id(account_id)
+
+        def _tq_at(self) -> dt.datetime:
+            """Now, from an INJECTED clock.
+
+            A broker fill's timestamp is written into the journal, so reading the wall clock
+            here would make a replay of the same broker state produce a different journal -- the
+            determinism invariant this project holds everywhere else. The clock is the one the
+            composition root supplies; `clock` in this scope is the engine's LiveClock, which is
+            why this needs its own.
+            """
+            return self._tq_clock.now()
 
         # -- our surface, prefixed so it cannot collide with the engine's ---------------
 
@@ -418,7 +435,7 @@ def build_execution_client(
             )
 
             try:
-                ack = self._tq_broker.submit(approval, at=dt.datetime.now(tz=dt.UTC))
+                ack = self._tq_broker.submit(approval, at=self._tq_at())
             except BrokerError as exc:
                 # An ambiguous outcome is never retried; the reconciler resolves it.
                 self.generate_order_rejected(
@@ -466,9 +483,7 @@ def build_execution_client(
                 return
             client_order_id = str(getattr(order, "client_order_id", "") or "")
             try:
-                self._tq_broker.cancel(
-                    client_order_id=client_order_id, at=dt.datetime.now(tz=dt.UTC)
-                )
+                self._tq_broker.cancel(client_order_id=client_order_id, at=self._tq_at())
             except BrokerError:
                 return
 

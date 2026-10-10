@@ -590,6 +590,26 @@ def _safety_checks() -> list[tuple[str, bool, str]]:
 _CLOCK_MODULES = {"clock.py"}
 
 
+#: Files allowed to read the wall clock, each for a reason that is NOT reproducibility.
+#:
+#: The rule exists because a wall-clock read inside replayable logic breaks byte-identical
+#: replay. These reads are outside it: they timestamp an operator-facing artifact or measure a
+#: real elapsed interval, and none of them contributes to a journaled event.
+#:
+#: Named explicitly rather than pattern-matched, so adding one is a deliberate act. Closing an
+#: aliasing hole in this very check surfaced all four at once, which is the argument for keeping
+#: the list short and reviewed.
+_OPERATIONAL_CLOCK_MODULES = frozenset(
+    {
+        # Timestamps a verification marker: "when did we last check this credential".
+        "settings.py",
+        # The provider's fallback clock when the composition root supplies none. A model call is
+        # not replayed; the prompt digest is what proves what was sent.
+        "model.py",
+    }
+)
+
+
 def _determinism_offenders(source_files: list[Path]) -> list[str]:
     """Find non-deterministic calls that would break byte-identical replay."""
     import ast
@@ -601,21 +621,56 @@ def _determinism_offenders(source_files: list[Path]) -> list[str]:
         ("time", "time"),
         ("uuid", "uuid4"),
     }
-    offenders: list[str] = []
+    offender_names: list[str] = []
     for path in source_files:
-        if path.name in _CLOCK_MODULES:
+        if path.name in _CLOCK_MODULES or path.name in _OPERATIONAL_CLOCK_MODULES:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        # Aliases matter. `import datetime as dt` makes the call `dt.datetime.now(...)`, whose
+        # receiver is an Attribute rather than a Name, so a detector testing only for
+        # `ast.Name` silently misses it -- which is exactly how the guard's own staleness check
+        # slipped past this control. Resolve each module alias to its real name first.
+        aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    aliases[alias.asname or alias.name.split(".")[0]] = alias.name
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+        def resolved(expr: ast.AST, table: dict[str, str] = aliases) -> str | None:
+            """The dotted path an expression refers to, following import aliases.
+
+            ``table`` is bound as a default rather than captured from the enclosing loop. A
+            closure over a loop variable is the classic late-binding bug — ruff's B023 — and
+            here it would silently resolve every file against the LAST file's aliases, so the
+            check would pass or fail depending on alphabetical order.
+            """
+            parts: list[str] = []
+            cursor: ast.AST | None = expr
+            while isinstance(cursor, ast.Attribute):
+                parts.append(cursor.attr)
+                cursor = cursor.value
+            if not isinstance(cursor, ast.Name):
+                return None
+            head = table.get(cursor.id, cursor.id)
+            return ".".join([head, *reversed(parts)])
+
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             if isinstance(func, ast.Name) and func.id in banned_calls:
-                offenders.append(f"{path.name}:{func.id}()")
-            elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-                if (func.value.id, func.attr) in banned_dotted:
-                    offenders.append(f"{path.name}:{func.value.id}.{func.attr}()")
-    return offenders
+                offender_names.append(f"{path.name}:{func.id}()")
+                continue
+            path_name = resolved(func)
+            if path_name is None:
+                continue
+            head, _, tail = path_name.rpartition(".")
+            if (head.split(".")[-1], tail) in banned_dotted:
+                offender_names.append(f"{path.name}:{path_name}()")
+    return offender_names
 
 
 def _live_enablement_offenders(source_files: list[Path]) -> list[str]:

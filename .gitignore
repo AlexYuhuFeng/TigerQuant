@@ -42,3 +42,7 @@ config/*.local.yaml
 .idea/
 Thumbs.db
 desktop.ini
+
+# Temp directories created by ad-hoc probes. A tool that writes to tempfile.mkdtemp()
+# under the repo root must never be committable.
+tmp*/

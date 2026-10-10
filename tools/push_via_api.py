@@ -158,7 +158,9 @@ def main() -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--branch", default="dev", help="local branch to replay")
     parser.add_argument("--remote-branch", default="main")
-    parser.add_argument("--skip-commits", type=int, default=0, help="resume: commits already pushed")
+    parser.add_argument(
+        "--skip-commits", type=int, default=0, help="resume: commits already pushed"
+    )
     args = parser.parse_args()
 
     auth = token()
@@ -211,7 +213,9 @@ def main() -> int:
         created = api("POST", f"/repos/{args.repo}/git/commits", commit_payload, auth)
         parent_commit = str(created["sha"])
         parent_tree = tree_sha
-        print(f"  [{index}/{len(history)}] {commit[:8]} -> {parent_commit[:8]} {meta['message'].splitlines()[0][:58]}")
+        print(
+            f"  [{index}/{len(history)}] {commit[:8]} -> {parent_commit[:8]} {meta['message'].splitlines()[0][:58]}"
+        )
 
     if parent_commit is None:
         print("nothing to push")

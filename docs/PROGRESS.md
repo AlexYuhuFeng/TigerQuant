@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-04 strategy-loop parity; CR-09 needs CR-03's grant for a long run
+Current CR: hardening complete; CR-03 awaits the owner's write-scope decision
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -473,6 +473,40 @@ claim true at the cost of conflating documents that genuinely differ — the wro
 evidence store. The real behaviour is now asserted, which exposes a real gap: **revision chaining
 is not implemented**, so a feed that reformats its articles would accumulate near-duplicates.
 
+### 2026-10-10 — Account-guard hardening: the precondition for write scope
+
+Full evidence: `docs/evidence/guard_write_scope.txt`.
+
+One OAuth grant returns **both** a funded live-capable account and the paper account. There is no
+separate paper issuer and the token is not paper-bound, so the **guard is the only thing keeping
+this project paper-only** — which is why it got this treatment before any grant.
+
+**Three checks before every submission**, all at the write call site, in increasing specificity:
+the scope is **re-read** (a token can be re-scoped under a running process); the broker is **asked
+again** (how a grant that gains a live account mid-session is caught); and `assert_verified_is_paper`
+refuses a live-capable type. `is_live_capable` is **deny-by-default** — only an explicit `PAPER`
+is not live-capable, because an unrecognised type must fail as a refusal rather than an acceptance.
+A staleness bound (300s) stops a long-running process trading on a check from this morning.
+
+19 tests, several asserting the stronger property: when re-verification fails, **`place_order` is
+never called**. Refusing after the order is sent would be worthless.
+
+**A real hole in the determinism control, found by this work.** Writing the guard's staleness
+check added `dt.datetime.now(...)` — and `doctor` still said "determinism: clean". The detector
+matched `ast.Attribute` on an `ast.Name`, so it caught `datetime.datetime.now()` but **not**
+`dt.datetime.now()`: `import datetime as dt` defeated it entirely.
+
+Closing that hole surfaced **seven real offenders** that had been invisible all along. Split by
+consequence: the **adapter's** timestamps reach the *journal*, so they now come from an injected
+clock — a wall-clock read there would break byte-identical replay. The guard's staleness check
+takes an injected clock too. `settings.py` and `model.py` are on an explicit **named** allow-list
+(filenames, not a pattern) because they timestamp an operator artifact or measure a real interval
+and neither contributes to a journaled event.
+
+Ruff then caught the fix itself (B023, late binding): my resolver captured the loop variable
+`aliases`, so it would have resolved every file against the *last* file's aliases and the check
+would have passed by alphabetical accident.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
@@ -503,6 +537,8 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
   needs a kernel, a data client and a strategy registration. `DataClient` and
   `InstrumentProvider` are pinned by the compatibility test but not written, because without a
   verified market-data entitlement there is nothing for them to load.
+- **CR-03's remaining precondition is a decision, not code.** The guard is hardened and
+  tested; the write-scoped grant is the owner's call (docs/evidence/guard_write_scope.txt).
 - **CR-03 is partial.** The guarded write adapter exists and is tested, but **no order has ever
   been submitted**, so its status is `SIMULATED`. The remaining acceptance item is a real paper
   round trip, which needs a write-scoped OAuth grant — an owner decision, not a coding task.

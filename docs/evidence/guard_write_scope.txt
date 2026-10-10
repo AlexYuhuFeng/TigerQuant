@@ -1,0 +1,161 @@
+TigerQuant — account-guard hardening, and a real hole in the determinism control
+Generated: see the git commit this file was added in
+
+Gate this is the precondition for: granting `api.trade:write` to the Tiger credential (CR-03).
+It is NOT granted, and this work is what has to hold before it is.
+
+===========================================================================
+1. Why the guard is the whole control
+===========================================================================
+Verified live in CR-02, and repeated here because everything below depends on it:
+
+    {"account": "***1346",           "accountType": "STANDARD", "status": "Funded"}
+    {"account": "*************2713", "accountType": "PAPER",    "status": "Funded"}
+
+ONE OAuth grant returns BOTH. There is no separate paper issuer, and the token is not
+paper-bound. So adding api.trade:write would give that credential the ability to trade the
+live-capable account too.
+
+The scope does not bind the token to an account. The host does not. The token itself says
+nothing. **The account guard is the only thing keeping this project paper-only**, so it is worth
+more scrutiny than any other component here.
+
+===========================================================================
+2. What was wrong before this change
+===========================================================================
+Verification happened ONCE, at client construction. Three specific gaps:
+
+  a. A grant that acquired a live-capable account AFTER construction was never noticed. Nothing
+     re-asked the broker.
+  b. No separate assertion that the verified account is not live-capable. Verification asks "is
+     this the account we were told to use"; it did not ask "could this account hold real money".
+     A misconfigured guard could answer yes to the first while pointed at a funded account.
+  c. No staleness bound. A process running for a week rode on one check from startup.
+
+===========================================================================
+3. What the guard does now
+===========================================================================
+THREE CHECKS BEFORE EVERY SUBMISSION, in increasing specificity, all at the write call site:
+
+  1. require_write_scope(self._session)   -- the scope is RE-READ, not remembered from the
+     session handed to __init__. A token can be rotated or re-scoped under a running process.
+  2. reverify_from_client(self._client)   -- the broker is ASKED AGAIN. This is the one that
+     matters: it is how a grant that gains a live account mid-session is caught.
+  3. assert_verified_is_paper()           -- refuses a live-capable or unrecognised type.
+  then assert_account_matches(order.account) -- place_order sends order.account, not
+     config.account, so the object is checked too.
+
+Plus `is_live_capable` on AccountIdentity, DENY BY DEFAULT: only an explicit "PAPER" is not
+live-capable. An unrecognised or absent account type is treated as live-capable, because
+guessing the other way is the mistake that cannot be undone.
+
+And a staleness bound (default 300s): a verification older than the limit is discarded before
+the re-query, so a long-running process cannot trade on a check from this morning.
+
+===========================================================================
+4. The tests, which are the actual deliverable
+===========================================================================
+tests/unit/test_guard_write_scope.py, 19 tests, organised as the precondition:
+
+  test_every_live_capable_type_is_refused        every type in LIVE_CAPABLE_ACCOUNT_TYPES
+  test_an_unrecognised_type_is_treated_as_live_capable
+  test_an_absent_type_is_treated_as_live_capable
+  test_if_the_paper_account_disappears_the_submission_is_refused
+  test_if_the_account_becomes_live_capable_the_submission_is_refused
+  test_the_broker_is_asked_again_before_every_order
+  test_a_session_that_loses_write_scope_cannot_submit
+  test_a_stale_verification_is_not_reused
+  test_the_default_age_limit_is_finite
+  test_the_guard_is_what_keeps_this_paper_only    -- states the claim explicitly
+
+Several assert the stronger property: when re-verification fails, `place_order` is NEVER
+CALLED. Refusing after the order has been sent would be worthless.
+
+===========================================================================
+5. A REAL HOLE IN THE DETERMINISM CONTROL, found by this work
+===========================================================================
+Writing the guard's staleness check added `dt.datetime.now(tz=dt.UTC)` -- and `tigerquant
+doctor` still reported "determinism: clean".
+
+The detector tested for `ast.Attribute` whose receiver was an `ast.Name`, so it caught
+`datetime.datetime.now()` but NOT `dt.datetime.now()`. `import datetime as dt` defeated it
+completely. The pattern it exists to forbid was invisible to it.
+
+Closing the hole (resolving import aliases before matching) immediately surfaced SEVEN real
+offenders that had been there all along:
+
+  execution_client.py x2   the Nautilus adapter's fill and submission timestamps
+  guard.py x2              the new staleness check
+  model.py                 the provider's fallback clock
+  settings.py x2           verification-marker timestamps
+
+Split by consequence:
+
+  * The ADAPTER's timestamps reach the JOURNAL, so they now come from an INJECTED clock. A
+    wall-clock read there would make a replay of the same broker state produce a different
+    journal, which is the invariant this project holds everywhere else. Fixed, not excused.
+  * The GUARD's staleness check now takes an injected clock too.
+  * settings.py and model.py are on an explicit, named allow-list. They timestamp an
+    operator-facing artifact and measure a real elapsed interval, and neither contributes to a
+    journaled event. The list is a frozenset of FILENAMES rather than a pattern, so adding one
+    is a deliberate act.
+
+Verified afterwards that the detector catches all three spellings: `datetime.datetime.now()`,
+`dt.datetime.now()`, and `when.datetime.now()`.
+
+Ruff also flagged the fix itself (B023, late binding): my nested resolver captured the loop
+variable `aliases`, so it would have resolved every file against the LAST file's aliases and
+the check would have passed or failed by alphabetical accident. Bound as a default instead.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+715 passed
+
+$ python -m pytest tests/unit/test_guard_write_scope.py -q
+19 passed
+
+$ python -m tigerquant doctor
+[PASS] determinism (no uuid4 / wall-clock calls outside core.clock): clean
+[PASS] mode capabilities (no submission in BACKTEST/SHADOW, LIVE gated): clean
+[PASS] no live enablement surface in source: clean
+[PASS] implementation status is labelled: SIMULATED
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 94 source files
+
+===========================================================================
+7. What this does and does not authorise
+===========================================================================
+AUTHORISES: nothing. Write scope has not been granted, no order has been submitted, and CR-03
+stays blocked.
+
+MAKES SAFE: granting api.trade:write to the Tiger credential. With the checks above, a
+write-scoped token whose grant also exposes a funded account still cannot reach submission:
+verification refuses the account, `assert_verified_is_paper` refuses the type, and re-verification
+happens before every order rather than once at startup.
+
+DOES NOT CHANGE: Mode.LIVE still raises in the engine adapter. No risk limit is relaxed. No
+live credential exists. The remaining precondition before a grant is the owner's decision, not
+another code change.
+
+===========================================================================
+8. Limitations
+===========================================================================
+1. The live-capable type list (STANDARD, PRIME, FUTURES, MARGIN) is inferred from what Tiger
+   was observed to report plus the names in its documentation. A type this list does not name
+   is still refused -- `is_live_capable` is deny-by-default -- so the failure mode is a false
+   refusal rather than a false acceptance.
+2. Re-verification costs one broker read per submission. At 30 orders an hour that is
+   negligible; at a much higher rate it would need caching with a shorter staleness bound
+   rather than removal.
+3. No test exercises a real Tiger account of either type. Every fixture is synthetic, because
+   touching the live account is not something this project may do. The guard's logic is
+   therefore tested against the RESPONSE SHAPES CR-02 observed, not against the live API.
+4. `require_write_scope` is called on every submission but reads `session.scopes`, a property of
+   the session object. If a session cached a stale scope string, the re-read would not help.
+   The OAuth session is the SDK's and refreshing is its responsibility.

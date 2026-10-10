@@ -25,9 +25,11 @@ option that turns it off.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from tigerquant.core.clock import Clock, SystemClock
 from tigerquant.core.enums import ReasonCode, Severity
 from tigerquant.core.errors import BrokerError, ConfigurationError, IntegrationUnavailable
 
@@ -45,6 +47,13 @@ __all__ = [
 
 #: Tiger's documented paper-account length rule (`AccountUtil.PAPER_ACCOUNT_DIGIT_LEN`).
 PAPER_ACCOUNT_MIN_DIGITS = 17
+
+
+#: The only account type this project will trade. Anything else is treated as live-capable.
+PAPER_ACCOUNT_TYPE = "PAPER"
+
+#: Account types known to hold real money, named so a refusal can say why.
+LIVE_CAPABLE_ACCOUNT_TYPES = frozenset({"STANDARD", "PRIME", "FUTURES", "MARGIN"})
 
 
 def mask_account(account: str) -> str:
@@ -71,6 +80,20 @@ class AccountIdentity:
     def masked(self) -> str:
         return mask_account(self.account)
 
+    @property
+    def is_paper(self) -> bool:
+        return str(self.account_type or "").upper() == PAPER_ACCOUNT_TYPE
+
+    @property
+    def is_live_capable(self) -> bool:
+        """Whether this account could hold real money.
+
+        Deny-by-default: only an explicitly PAPER account is not live-capable. An account type
+        we do not recognise is treated as live-capable, because guessing the other way is the
+        mistake that cannot be undone.
+        """
+        return not self.is_paper
+
     def as_record(self) -> dict[str, str | None]:
         """Audit-safe rendering: the masked account plus the reported attributes."""
         return {
@@ -78,6 +101,7 @@ class AccountIdentity:
             "capability": self.capability,
             "status": self.status,
             "account_type": self.account_type,
+            "is_live_capable": str(self.is_live_capable),
         }
 
 
@@ -340,10 +364,26 @@ class TigerAccountGuard:
     redirect a running process at a funded account.
     """
 
-    __slots__ = ("_identity", "_requested", "_verdict")
+    __slots__ = (
+        "_clock",
+        "_identity",
+        "_max_verification_age_seconds",
+        "_requested",
+        "_verdict",
+        "_verified_at",
+    )
 
-    def __init__(self, *, requested_account: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        requested_account: str | None,
+        max_verification_age_seconds: float = 300.0,
+        clock: Clock | None = None,
+    ) -> None:
         self._requested = requested_account
+        self._max_verification_age_seconds = max_verification_age_seconds
+        self._clock = clock or SystemClock()
+        self._verified_at: dt.datetime | None = None
         self._identity: AccountIdentity | None = None
         self._verdict: AccountVerdict | None = None
 
@@ -393,12 +433,60 @@ class TigerAccountGuard:
             allow_short_paper_numbers=allow_short_paper_numbers,
         )
         self._verdict = verdict
+        self._verified_at = self._clock.now()
         if verdict.verified:
             self._identity = verdict.identity
         else:
             # A previously verified account is invalidated by a failed re-verification.
             self._identity = None
         return verdict
+
+    @property
+    def verification_age_seconds(self) -> float | None:
+        """How long ago the broker was last asked. ``None`` if it never has been."""
+        if self._verified_at is None:
+            return None
+        return (self._clock.now() - self._verified_at).total_seconds()
+
+    def reverify_from_client(self, trade_client: Any) -> AccountIdentity:
+        """Ask the broker again, right now, and refuse unless it is still a paper account.
+
+        Constructing the client verified once. That is not enough for a write-scoped credential,
+        and the reason is specific to this project's situation: a single OAuth grant was observed
+        returning BOTH a live-capable account and a paper account (docs/evidence/
+        cr02_authorization.txt). A grant that is read-only at 09:00 and write-scoped at 09:05 is
+        the same grant, and nothing about the token says which account an order will hit.
+
+        So the account is re-checked at the moment it matters -- immediately before a
+        submission -- rather than trusted from startup. One extra read call per order is cheap
+        next to sending one order to the wrong account.
+        """
+        if self.verification_age_seconds is not None:
+            if self.verification_age_seconds > self._max_verification_age_seconds:
+                # Even a successful re-verification is only good for so long; a stale check is
+                # how a long-running process ends up trading an account nobody looked at today.
+                self._identity = None
+        verdict = self.verify_from_client(trade_client, allow_short_paper_numbers=True)
+        return verdict.raise_if_refused()
+
+    def assert_verified_is_paper(self) -> AccountIdentity:
+        """Assert the verified account is not live-capable, naming the type if it is.
+
+        Separate from verification because it answers a different question: verification asks
+        "is this the account we were told to use", and this asks "could this account hold real
+        money". A misconfigured guard could conceivably answer yes to the first and still be
+        pointed at a funded account.
+        """
+        identity = self.require_verified()
+        if identity.is_live_capable:
+            known = identity.account_type or "(not reported)"
+            msg = (
+                f"refusing to trade {identity.masked()}: the broker reports account type "
+                f"{known!r}, which is not {PAPER_ACCOUNT_TYPE!r}. This account could hold real "
+                "money. Only an explicitly paper account may be traded (AGENTS.md invariant 1)."
+            )
+            raise BrokerError(msg)
+        return identity
 
     def require_verified(self) -> AccountIdentity:
         """Return the verified account, or refuse."""
