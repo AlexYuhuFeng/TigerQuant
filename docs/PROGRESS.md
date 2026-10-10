@@ -159,11 +159,11 @@ projections. Until now that was a claim about intent. `db/projector.py` makes it
 behaviour: it reconstructs the relational tables from the journal alone, and compares what the
 journal implies against what the database says.
 
-Verified against real PostgreSQL: 31/31 events projected, 5 order rows, 6 portfolio marks,
-**cash 95179.48** — exactly the figure in CR-01's evidence, which is the only reason to trust
+Verified against real PostgreSQL: 31/31 events, 5 order rows, 1 fill (SPY BUY 8 @ 602.5602),
+1 position, 6 decisions, 1 risk outcome, 6 portfolio marks, and **cash 95179.48** — exactly the figure in CR-01's evidence, which is the only reason to trust
 the projection. Re-running wrote nothing and changed nothing.
 
-**Two bugs found, both by guards that already existed:**
+**Four bugs found. Two by guards that already existed, two only by running it:**
 
 1. **A replayed projection regressed a completed order back to `CREATED`.** The fold starts
    fresh each pass, so the journal's first event re-emitted `CREATED` for an order the venue
@@ -181,6 +181,20 @@ reimplemented the order state machine and failed on the live run with
 `CREATED → RISK_APPROVED → SUBMITTING` and `RiskEvaluated` carries that transition. A second
 implementation had no way to know. The projector now folds with the existing
 `OrderProjection` and persists the result.
+
+Two more surfaced only when the full projection ran against a clean database:
+
+3. **The fill projection was unreachable and silently wrote zero fills.**
+   `OrderPartiallyFilled` and `OrderFilled` belong to *both* the order-event set and the
+   fill-event set — they advance the state machine *and* carry an execution — so written as
+   `if`/`elif`, the fill branch could never run. Everything else looked right (31 events,
+   correct cash, a consistent drift report); the only symptom was `0 fill(s)` for a scenario
+   whose entire purpose is to fill an order.
+4. **The fill payload didn't satisfy the repository's fill contract.** `OrderPartiallyFilled`
+   carries the execution but not the instrument or the side — those belong to the order. The
+   insert raised `KeyError: 'instrument'` and the whole projection rolled back, which is the
+   transaction boundary doing its job. The payload is now enriched from the folded order, and
+   a fill whose order is unknown is refused rather than given a fabricated instrument.
 
 Drift is reported and never repaired: a divergence means we do not know which record is wrong,
 and overwriting either would destroy the evidence needed to find out. The two directions are

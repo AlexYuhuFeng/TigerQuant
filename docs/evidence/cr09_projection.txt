@@ -99,10 +99,10 @@ incomplete. --allow-gaps exists only for inspecting a known-damaged journal.
 5. Test results
 ===========================================================================
 $ python -m pytest tests -q
-475 passed
+480 passed
 
 $ python -m pytest tests/unit/test_db_projector.py -q
-13 passed
+18 passed
 
 $ python -m ruff check src tests tools
 All checks passed!
@@ -111,11 +111,61 @@ $ python -m mypy
 Success: no issues found in 77 source files
 
 ===========================================================================
-6. Limitations
+6. Full projection: every journaled projection, verified live
 ===========================================================================
-1. Only orders and portfolio state are projected. Fills, positions, facts, decisions, risk
-   outcomes and alerts have repository methods but no projection yet. What is projected is
-   projected correctly; what is not projected is not claimed.
+$ psql -c "TRUNCATE events, orders, fills, positions, portfolio_state, decisions,
+                risk_outcomes, alerts, evidence_facts CASCADE"
+$ python -m tigerquant project out/cr09_journal.jsonl --mode BACKTEST
+mode BACKTEST: projected 31/31 event(s): 5 order row(s) written, 1 order(s) tracked
+(0 open), 1 fill(s), 1 position(s), 6 decision(s), 1 risk outcome(s), 0 alert(s),
+6 portfolio mark(s); last sequence 30
+  consistent: 31 event(s), 1 order(s), cash 95179.48
+[exit code: 0]
+
+$ python -m tigerquant project out/cr09_journal.jsonl --mode BACKTEST   # replay
+mode BACKTEST: projected 0/31 event(s); 31 already present: 0 order row(s) written,
+1 order(s) tracked (0 open), 0 fill(s), 1 position(s), 6 decision(s), 1 risk outcome(s),
+0 alert(s), 0 portfolio mark(s); last sequence 30
+
+Rows actually stored, from a clean database:
+  events=31 orders=1 fills=1 positions=1 decisions=6 risk=1 portfolio=1
+
+The fill row itself:
+  exec:c278132b52ce76b97e7b | bt-oi_01KJQG32W00000 | SPY | BUY | qty=8 @ 602.5602
+
+Note the first run above says "5 order row(s) written" but only one order exists: five
+order events advance that one order through five states, and each writes a row.
+
+===========================================================================
+7. Two more bugs the live run exposed
+===========================================================================
+BUG 3 - the fill projection was UNREACHABLE and silently wrote zero fills.
+  OrderPartiallyFilled and OrderFilled belong to BOTH the order-event set and the
+  fill-event set: they advance the order state machine AND carry an execution. Written as
+      if kind in _ORDER_EVENTS: ...
+      elif kind in _FILL_EVENTS: ...
+  the second branch could never execute. Everything else looked correct — 31 events, the
+  right cash, a consistent drift report — and the only symptom was "0 fill(s)" for a
+  scenario whose whole purpose is to fill an order. The fill branch is now nested inside the
+  order branch, with a comment saying why it must not be an elif.
+
+BUG 4 - the fill payload did not satisfy the repository's fill contract.
+  append_fill needs instrument, side, quantity, price and occurred_at. The event carries the
+  execution (exec_id, quantity, price) but NOT the instrument or the side, because those
+  belong to the order rather than to the execution. The insert failed with
+  KeyError: 'instrument', and the whole projection rolled back — which is the transaction
+  boundary doing its job.
+  Fixed by enriching the payload from the folded order before storing it, and by refusing to
+  write a fill whose order is unknown rather than fabricating an instrument. In the normal
+  path the order fold refuses that case first with IllegalOrderTransition, which is stronger.
+
+===========================================================================
+8. Limitations
+===========================================================================
+1. Orders, fills, positions, portfolio state, decisions and risk outcomes are projected and
+   verified. Evidence FACTS are not: the fact store is populated by ingestion, not journaled
+   as events in the CR-01 event set, so there is nothing in the journal to fold. Alerts are
+   projected but the scenarios produce none, so that path is exercised by unit test only.
 2. The rebuild case (projections lost, events intact) is handled by the "row is missing"
    branch, but there is no CLI command that drops and rebuilds the tables. Add one before
    relying on it operationally.

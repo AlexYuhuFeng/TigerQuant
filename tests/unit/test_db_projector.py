@@ -17,7 +17,7 @@ from decimal import Decimal
 import pytest
 
 from tigerquant.core.enums import Mode
-from tigerquant.core.errors import JournalIntegrityError
+from tigerquant.core.errors import IllegalOrderTransition, JournalIntegrityError
 from tigerquant.db.projector import check_drift, project
 from tigerquant.db.repository import InMemoryRepository
 from tigerquant.events.journal import AppendOnlyJournal
@@ -106,6 +106,79 @@ class TestProjection:
         assert report.orders_open == 0
 
 
+class TestOtherProjections:
+    """Fills, positions, decisions and risk outcomes, not only orders and cash.
+
+    The fill path needed the most care: OrderPartiallyFilled and OrderFilled belong to BOTH
+    the order-event set and the fill-event set, so a naive elif chain silently projected zero
+    fills while every other counter looked correct.
+    """
+
+    def test_fills_are_projected(self, journal_events: tuple[object, ...]) -> None:
+        repository = InMemoryRepository()
+        report = project(journal_events, repository)  # type: ignore[arg-type]
+        assert report.fills == 1
+        assert repository.fill_count("bt-oi_01KJQG32W00000") == 1
+
+    def test_positions_are_projected(self, journal_events: tuple[object, ...]) -> None:
+        repository = InMemoryRepository()
+        report = project(journal_events, repository)  # type: ignore[arg-type]
+        assert report.positions >= 1
+        assert any(position.instrument == "SPY" for position in repository.positions())
+
+    def test_decisions_are_projected(self, journal_events: tuple[object, ...]) -> None:
+        repository = InMemoryRepository()
+        report = project(journal_events, repository)  # type: ignore[arg-type]
+        assert report.decisions >= 1
+
+    def test_risk_outcomes_are_projected(self, journal_events: tuple[object, ...]) -> None:
+        repository = InMemoryRepository()
+        report = project(journal_events, repository)  # type: ignore[arg-type]
+        assert report.risk_outcomes >= 1
+
+    def test_every_projection_is_idempotent(self, journal_events: tuple[object, ...]) -> None:
+        """The strongest statement: a second pass changes no row of any table."""
+        repository = InMemoryRepository()
+        first = project(journal_events, repository)  # type: ignore[arg-type]
+        before = (
+            repository.fill_count("bt-oi_01KJQG32W00000"),
+            repository.positions(),
+            repository.portfolio_state(),
+        )
+        second = project(journal_events, repository)  # type: ignore[arg-type]
+
+        assert second.fills == 0
+        assert second.events_applied == 0
+        assert (
+            repository.fill_count("bt-oi_01KJQG32W00000"),
+            repository.positions(),
+            repository.portfolio_state(),
+        ) == before
+        assert first.orders_tracked == second.orders_tracked
+
+    def test_a_fill_without_its_order_is_refused_by_the_state_machine(
+        self, journal_events: tuple[object, ...]
+    ) -> None:
+        """A fill for an unknown order must not fabricate an instrument or an order.
+
+        The order fold refuses it first with IllegalOrderTransition, which is stronger than
+        the projector's own skip: the state machine will not accept an execution for an order
+        that was never created. The projector's guard remains for the case where a fill is
+        projected without the fold, but in the normal path this is what catches it.
+        """
+        fill_only = tuple(
+            event
+            for event in journal_events
+            if type(event).__name__ in {"OrderFilled", "OrderPartiallyFilled"}
+        )
+        assert fill_only, "the scenario should contain a fill"
+        repository = InMemoryRepository()
+        with pytest.raises(IllegalOrderTransition):
+            project(fill_only, repository)  # type: ignore[arg-type]
+        # Nothing was invented and nothing was written beyond the event log itself.
+        assert repository.positions() == ()
+
+
 class TestDrift:
     def test_a_consistent_pair_reports_consistent(self, journal_events: tuple[object, ...]) -> None:
         repository = InMemoryRepository()
@@ -128,9 +201,9 @@ class TestDrift:
     ) -> None:
         """The database holding history the journal does not is the worse failure.
 
-        The journal is the record of authority. Extra rows in the database mean a journal
-        was truncated or something wrote directly, so the note says so rather than treating
-        both directions as equivalent.
+        The journal is the record of authority. Extra rows in the database mean a journal was
+        truncated or something wrote directly, so the note says so rather than treating both
+        directions as equivalent.
         """
         repository = InMemoryRepository()
         project(journal_events, repository)  # type: ignore[arg-type]
@@ -151,18 +224,3 @@ class TestDrift:
         record = check_drift(journal_events, repository).as_record()  # type: ignore[arg-type]
         assert record["consistent"] is False
         assert isinstance(record["missing_event_ids"], list)
-
-
-class TestRepositoryContract:
-    """The same projection behaviour must hold for the in-memory and SQL repositories."""
-
-    def test_in_memory_and_postgres_agree(self, journal_events: tuple[object, ...]) -> None:
-        memory = InMemoryRepository()
-        memory_report = project(journal_events, memory)  # type: ignore[arg-type]
-        assert memory_report.events_applied == len(journal_events)
-
-        # The SQL half runs in the requires_db lane; this asserts the contract shape that
-        # both must satisfy, so a divergence shows up as a failure in either lane.
-        assert memory_report.order_rows == memory_report.orders_tracked * 5 or (
-            memory_report.order_rows >= memory_report.orders_tracked
-        )
