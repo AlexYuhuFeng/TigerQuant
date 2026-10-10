@@ -22,6 +22,7 @@ from tigerquant.decision.validation import DecisionContext, DecisionValidator
 from tigerquant.events.market import MarketBar
 from tigerquant.evidence.ingest import fact_from_bar
 from tigerquant.evidence.snapshot import SnapshotBuilder
+from tigerquant.evidence.sources import default_test_registry
 from tigerquant.evidence.store import EvidenceStore
 from tigerquant.market.fixtures import load_scenario
 from tigerquant.market.session import TradingSession
@@ -123,7 +124,7 @@ class TestEvidenceFailures:
     def _store_and_snapshot(
         self, *, extra_source: str | None = None
     ) -> tuple[EvidenceStore, SnapshotBuilder, str]:
-        store = EvidenceStore()
+        store = EvidenceStore(default_test_registry())
         builder = SnapshotBuilder(store, max_age_seconds=900)
         fact = fact_from_bar(bar("600.00"), max_age_seconds=900)
         store.add(fact)
@@ -172,7 +173,7 @@ class TestEvidenceFailures:
         assert not snapshot.is_usable
 
     def test_stale_evidence_is_rejected(self) -> None:
-        store = EvidenceStore()
+        store = EvidenceStore(default_test_registry())
         builder = SnapshotBuilder(store, max_age_seconds=60)
         fact = fact_from_bar(bar("600.00"), max_age_seconds=60)
         store.add(fact)
@@ -181,7 +182,7 @@ class TestEvidenceFailures:
         assert any("stale" in reason for reason in snapshot.reasons)
 
     def test_future_evidence_cannot_be_cited(self) -> None:
-        store = EvidenceStore()
+        store = EvidenceStore(default_test_registry())
         builder = SnapshotBuilder(store, max_age_seconds=900)
         future = fact_from_bar(bar("700.00", minutes=10), max_age_seconds=900)
         store.add(future)

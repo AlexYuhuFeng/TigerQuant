@@ -1,9 +1,20 @@
-"""Point-in-time evidence store (interface frozen in CR-01; durable store in CR-05).
+"""Point-in-time evidence store.
 
 The only read API is ``as_of``-bounded. There is deliberately no ``get_latest()``: a
-caller that wants "the newest fact" must say *as of when*, which is what makes
-acceptance gate 12 (no future revisions in replay) a property of the interface rather
-than of reviewer discipline.
+caller that wants "the newest fact" must say *as of when*, which is what makes acceptance
+gate 12 (no future revisions in replay) a property of the interface rather than of
+reviewer discipline.
+
+Three disciplines are enforced here rather than left to callers:
+
+1. **Provenance is registered.** A fact may only enter the store for a source that exists
+   in the :class:`~tigerquant.evidence.sources.SourceRegistry`; an unknown source is a
+   hard error, not a new implicit source.
+2. **Revisions are appended, never mutated.** :meth:`EvidenceStore.effective_fact` walks
+   the ``supersedes`` chain forward only as far as ``as_of`` allows, so a replay at an
+   earlier instant sees the revision that actually existed then.
+3. **Freshness is per category.** :class:`~tigerquant.evidence.staleness.StalenessPolicy`
+   decides what "stale" means for each kind of fact.
 """
 
 from __future__ import annotations
@@ -14,33 +25,69 @@ from typing import TYPE_CHECKING
 from tigerquant.core.clock import ensure_utc
 from tigerquant.core.enums import ReasonCode
 from tigerquant.core.errors import EvidenceError
+from tigerquant.evidence.staleness import StalenessPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
     from tigerquant.evidence.facts import Fact
+    from tigerquant.evidence.sources import SourceRegistry
 
-__all__ = ["EvidenceStore", "Resolution", "ResolutionReport"]
+__all__ = [
+    "INJECTION_FLAG_PREFIX",
+    "EvidenceStore",
+    "Resolution",
+    "ResolutionReport",
+    "ResolutionStatus",
+]
+
+#: Quality-flag prefix that marks content as prompt-injection-suspected.
+INJECTION_FLAG_PREFIX = "prompt_injection_suspected"
+
+
+class ResolutionStatus:
+    """Outcome of resolving one cited fact id."""
+
+    RESOLVED = "RESOLVED"
+    STALE = "STALE"
+    MISSING = "MISSING"
 
 
 class Resolution:
     """Per-fact resolution result."""
 
-    __slots__ = ("fact", "reason_code", "status")
+    __slots__ = ("effective", "fact", "reason_code", "status")
 
-    def __init__(self, status: str, fact: Fact | None, reason_code: ReasonCode | None) -> None:
+    def __init__(
+        self,
+        status: str,
+        fact: Fact | None,
+        reason_code: ReasonCode | None,
+        *,
+        effective: Fact | None = None,
+    ) -> None:
         self.status = status
         self.fact = fact
+        #: The revision in force at ``as_of`` (may differ from the cited revision).
+        self.effective = effective if effective is not None else fact
         self.reason_code = reason_code
 
     def __repr__(self) -> str:
-        return f"Resolution(status={self.status!r}, fact={None if self.fact is None else self.fact.fact_id})"
+        name = None if self.fact is None else self.fact.fact_id
+        return f"Resolution(status={self.status!r}, fact={name})"
 
 
 class ResolutionReport:
     """Aggregate outcome of resolving a set of cited evidence ids."""
 
-    __slots__ = ("as_of", "contradictions", "missing", "resolutions", "stale")
+    __slots__ = (
+        "as_of",
+        "contradictions",
+        "injection_flagged",
+        "missing",
+        "resolutions",
+        "stale",
+    )
 
     def __init__(
         self,
@@ -50,22 +97,50 @@ class ResolutionReport:
         missing: tuple[str, ...],
         stale: tuple[str, ...],
         contradictions: tuple[str, ...],
+        injection_flagged: tuple[str, ...] = (),
     ) -> None:
         self.as_of = as_of
         self.resolutions = resolutions
         self.missing = missing
         self.stale = stale
         self.contradictions = contradictions
+        #: Resolved facts whose content is injection-flagged. They are stored truthfully
+        #: but may not, on their own, admit a trade (ADR-0005 §6).
+        self.injection_flagged = injection_flagged
+
+    @property
+    def facts(self) -> tuple[Fact, ...]:
+        return tuple(
+            res.effective
+            for res in self.resolutions.values()
+            if res.status == ResolutionStatus.RESOLVED and res.effective is not None
+        )
+
+    @property
+    def usable_facts(self) -> tuple[Fact, ...]:
+        """Resolved facts that may support admission (injection-flagged ones excluded)."""
+        return tuple(
+            fact
+            for fact in self.facts
+            if not any(flag.startswith(INJECTION_FLAG_PREFIX) for flag in fact.quality_flags)
+        )
 
     @property
     def resolved_ids(self) -> tuple[str, ...]:
         return tuple(
-            fact_id for fact_id, res in self.resolutions.items() if res.status == "RESOLVED"
+            fact_id
+            for fact_id, res in self.resolutions.items()
+            if res.status == ResolutionStatus.RESOLVED
         )
 
     @property
     def ok(self) -> bool:
         return not (self.missing or self.stale or self.contradictions)
+
+    @property
+    def admits_a_trade(self) -> bool:
+        """Resolution succeeded *and* something usable remains to justify a trade."""
+        return self.ok and bool(self.usable_facts)
 
     def reason_code(self) -> ReasonCode | None:
         """The single reason code that should force abstention, if any."""
@@ -75,6 +150,8 @@ class ResolutionReport:
             return ReasonCode.EVIDENCE_STALE
         if self.contradictions:
             return ReasonCode.EVIDENCE_CONTRADICTORY
+        if not self.usable_facts:
+            return ReasonCode.SNAPSHOT_INCOMPLETE
         return None
 
     def summary(self) -> str:
@@ -85,6 +162,8 @@ class ResolutionReport:
             parts.append(f"stale={list(self.stale)}")
         if self.contradictions:
             parts.append(f"contradictions={list(self.contradictions)}")
+        if self.injection_flagged:
+            parts.append(f"injection_flagged={list(self.injection_flagged)}")
         return "; ".join(parts) if parts else "all evidence resolved"
 
 
@@ -95,10 +174,17 @@ class EvidenceStore:
     no-op, which makes ingestion idempotent (acceptance gate 7).
     """
 
-    __slots__ = ("_facts",)
+    __slots__ = ("_facts", "_registry")
 
-    def __init__(self) -> None:
+    def __init__(self, registry: SourceRegistry, *, facts: Iterable[Fact] = ()) -> None:
+        self._registry = registry
         self._facts: dict[str, Fact] = {}
+        for fact in facts:
+            self.add(fact)
+
+    @property
+    def registry(self) -> SourceRegistry:
+        return self._registry
 
     def __len__(self) -> int:
         return len(self._facts)
@@ -106,8 +192,18 @@ class EvidenceStore:
     def __iter__(self) -> Iterator[Fact]:
         return iter(self._facts.values())
 
+    def __contains__(self, fact_id: object) -> bool:
+        return fact_id in self._facts
+
     def add(self, fact: Fact) -> bool:
-        """Add ``fact``; return ``False`` when it was already present."""
+        """Add ``fact``; return ``False`` when it was already present.
+
+        Raises
+        ------
+        EvidenceError
+            If the fact's source is not registered. Provenance is not free text.
+        """
+        self._registry.get(fact.source_id)
         if fact.fact_id in self._facts:
             return False
         self._facts[fact.fact_id] = fact
@@ -134,27 +230,89 @@ class EvidenceStore:
             if fact.available_at <= moment and (category is None or fact.category == category)
         )
 
+    # -- revisions / vintages ----------------------------------------------------
+
+    def vintages(self, fact_id: str) -> tuple[Fact, ...]:
+        """The full ``supersedes`` chain containing ``fact_id``, oldest first.
+
+        The chain is discoverable from the middle as well as from the root, because a
+        caller may cite any revision.
+        """
+        start = self.get(fact_id)
+        chain: list[Fact] = [start]
+        seen = {start.fact_id}
+
+        current = start
+        while current.supersedes is not None and current.supersedes in self._facts:
+            previous = self._facts[current.supersedes]
+            if previous.fact_id in seen:
+                break
+            chain.insert(0, previous)
+            seen.add(previous.fact_id)
+            current = previous
+
+        current = chain[-1]
+        for _ in range(1_000):
+            successors = [
+                fact
+                for fact in self._facts.values()
+                if fact.supersedes == current.fact_id and fact.fact_id not in seen
+            ]
+            if not successors:
+                break
+            if len(successors) > 1:
+                msg = (
+                    f"fact {current.fact_id} has {len(successors)} successors; a revision "
+                    "chain must be linear"
+                )
+                raise EvidenceError(msg, ReasonCode.EVIDENCE_CONTRADICTORY)
+            current = successors[0]
+            chain.append(current)
+            seen.add(current.fact_id)
+        return tuple(chain)
+
+    def effective_fact(self, fact_id: str, as_of: dt.datetime) -> Fact:
+        """The revision in force at ``as_of``.
+
+        Revisions that were not yet available at ``as_of`` are ignored, so a replay at an
+        earlier instant sees exactly what existed then (acceptance gate 12).
+        """
+        moment = ensure_utc(as_of)
+        effective = self.get(fact_id)
+        for candidate in self.vintages(fact_id):
+            if candidate.is_known_at(moment):
+                effective = candidate
+        return effective
+
+    # -- resolution --------------------------------------------------------------
+
     def resolve(
         self,
         fact_ids: Iterable[str],
         *,
         as_of: dt.datetime,
-        max_age_seconds: int,
+        staleness: StalenessPolicy | int,
     ) -> ResolutionReport:
         """Resolve cited evidence ids against the point-in-time view.
 
         Failure modes, all of which force abstention (invariant 4):
 
         * ``missing`` — the id does not exist, or existed only *after* ``as_of``
-          (a model citing something it could not have seen is treated as fabrication).
-        * ``stale`` — older than ``max_age_seconds`` or past ``valid_until``.
+          (a model citing something it could not have seen is treated as fabrication);
+        * ``stale`` — older than its category's horizon, or past ``valid_until``;
         * ``contradictions`` — two available facts of the same
-          ``(instrument, category)`` disagree on ``value``.
+          ``(instrument, category, event_time)`` disagree on ``value``.
         """
+        policy = (
+            staleness
+            if isinstance(staleness, StalenessPolicy)
+            else StalenessPolicy.uniform(staleness)
+        )
         moment = ensure_utc(as_of)
         resolutions: dict[str, Resolution] = {}
         missing: list[str] = []
         stale: list[str] = []
+        injection_flagged: list[str] = []
         seen: set[str] = set()
 
         for fact_id in fact_ids:
@@ -163,25 +321,36 @@ class EvidenceStore:
             seen.add(fact_id)
             fact = self._facts.get(fact_id)
             if fact is None or not fact.is_known_at(moment):
-                resolutions[fact_id] = Resolution("MISSING", None, ReasonCode.EVIDENCE_UNRESOLVED)
+                resolutions[fact_id] = Resolution(
+                    ResolutionStatus.MISSING, None, ReasonCode.EVIDENCE_UNRESOLVED
+                )
                 missing.append(fact_id)
                 continue
-            age = (moment - fact.available_at).total_seconds()
-            if fact.is_stale(moment) or age > max_age_seconds:
-                resolutions[fact_id] = Resolution("STALE", fact, ReasonCode.EVIDENCE_STALE)
+
+            effective = self.effective_fact(fact_id, moment)
+            age = (moment - effective.available_at).total_seconds()
+            if effective.is_stale(moment) or age > policy.for_fact(effective):
+                resolutions[fact_id] = Resolution(
+                    ResolutionStatus.STALE, fact, ReasonCode.EVIDENCE_STALE, effective=effective
+                )
                 stale.append(fact_id)
                 continue
-            resolutions[fact_id] = Resolution("RESOLVED", fact, None)
 
-        contradictions = self._find_contradictions(
-            [res.fact for res in resolutions.values() if res.fact is not None], moment
-        )
+            resolutions[fact_id] = Resolution(
+                ResolutionStatus.RESOLVED, fact, None, effective=effective
+            )
+            if any(flag.startswith(INJECTION_FLAG_PREFIX) for flag in effective.quality_flags):
+                injection_flagged.append(fact_id)
+
+        facts = [res.effective for res in resolutions.values() if res.effective is not None]
+        contradictions = self._find_contradictions(facts, moment)
         return ResolutionReport(
             as_of=moment,
             resolutions=resolutions,
             missing=tuple(missing),
             stale=tuple(stale),
             contradictions=contradictions,
+            injection_flagged=tuple(injection_flagged),
         )
 
     def _find_contradictions(self, facts: list[Fact], as_of: dt.datetime) -> tuple[str, ...]:

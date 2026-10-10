@@ -30,6 +30,7 @@ out/
 # --- Secrets and local overrides (never commit) ---------------------------
 .env
 .env.*
+.secrets/
 *.pem
 *.key
 secrets/

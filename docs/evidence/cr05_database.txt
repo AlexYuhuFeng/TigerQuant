@@ -1,0 +1,130 @@
+TigerQuant CR-05 / database verification evidence
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. Containerised PostgreSQL up on Windows
+===========================================================================
+$ docker compose -f deploy/compose.yaml up -d
+ Container tigerquant-postgres  Started
+$ docker compose -f deploy/compose.yaml ps
+ tigerquant-postgres  Up (healthy)   127.0.0.1:5432->5432/tcp
+
+Image: public.ecr.aws/docker/library/postgres:17.6-alpine
+Digest: public.ecr.aws/docker/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+
+Why ECR Public rather than docker.io: registry-1.docker.io:443 is unreachable from the
+development network (verified by TCP probe; ghcr.io, quay.io and public.ecr.aws all
+answered). public.ecr.aws mirrors the *same* official Docker Hub library image, so the
+deployment is identical on hosts that can and cannot reach Docker Hub instead of making
+registry access a platform-specific prerequisite. Pin the digest above in compose.yaml.
+
+===========================================================================
+2. Per-mode isolation is enforced by the SERVER, not by convention
+===========================================================================
+Init script: deploy/postgres-init/01-databases.sql
+
+$ psql -c "SELECT datname FROM pg_database WHERE datname LIKE 'tq_%'"
+tq_backtest
+tq_live
+tq_paper
+tq_shadow
+
+$ psql -c "SELECT rolname, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname LIKE 'tq_%'"
+tq_backtest  f  f  f
+tq_live      f  f  f
+tq_paper     f  f  f
+tq_shadow    f  f  f
+tq_bootstrap t  t  t     (administrative only; never used by the application)
+
+$ psql -c "SELECT datname, datacl FROM pg_database WHERE datname LIKE 'tq_%'"
+tq_backtest  tq_backtest=CTc/tq_backtest tq_bootstrap=c/tq_backtest
+tq_live      tq_live=CTc/tq_live         tq_bootstrap=c/tq_live
+tq_paper     tq_paper=CTc/tq_paper       tq_bootstrap=c/tq_paper
+tq_shadow    tq_shadow=CTc/tq_shadow     tq_bootstrap=c/tq_shadow
+
+There is no PUBLIC entry in any ACL, i.e. the implicit world-connectable grant was revoked
+on template1 *before* the databases were created, so a new database is never briefly
+exposed. The proof that this is a real partition and not a naming convention:
+
+$ psql -U tq_backtest -d tq_paper -c "SELECT 1"
+psql: error: connection to server ... failed: FATAL:  permission denied for database "tq_paper"
+DETAIL:  User does not have CONNECT privilege.
+
+The application role for one mode cannot open another mode's database at all. This is
+AGENTS.md invariant 2 enforced by the database rather than by a namespace prefix.
+
+Implementation note: `CREATE DATABASE` cannot run inside a transaction or a PL/pgSQL
+function. The first version of the init script used a `DO $$ ... $$` loop and failed with
+"CREATE DATABASE cannot be executed from a function", rolling back the role creation with
+it. The script now uses `\gexec`, which executes each row as a standalone statement.
+
+===========================================================================
+3. Migrations against the real server
+===========================================================================
+$ python tools/db_migrate.py --mode backtest --dry-run
+target: postgresql://tq_backtest:***@127.0.0.1:5432/tq_backtest
+migrations: 1 (sha256:10a3705a16c77543310...)
+would apply 1: ['0001_initial']
+
+$ python tools/db_migrate.py --mode backtest
+applied 1: ['0001_initial']
+  0001_initial                 applied
+
+$ psql -U tq_backtest -d tq_backtest -c "\dt"
+alerts  decisions  events  evidence_facts  fills  orders  portfolio_state
+positions  risk_outcomes  schema_migrations  worker_leases
+
+Append-only enforcement (ADR-0004) is in the schema, not only in application code:
+$ psql -c "SELECT tgname, relname FROM pg_trigger WHERE NOT tgisinternal"
+events_append_only      | events
+fills_append_only       | fills
+migrations_append_only  | schema_migrations
+
+Database-level safety constraints verified by test:
+  * positions_long_only            -- a negative quantity is refused by the server
+  * risk_deny_has_reason           -- a DENY with no reason code cannot be stored
+  * lease_expiry_after_heartbeat   -- an impossible lease row cannot be written
+  * worker_leases                  -- cross-process mutual exclusion (gate 8)
+
+===========================================================================
+4. Test results
+===========================================================================
+$ python -m pytest tests -q                          # with PostgreSQL running
+354 passed
+
+$ python -m pytest tests -q -m "not requires_db"      # fast lane, no infrastructure
+334 passed, 20 deselected
+
+$ python -m pytest tests/integration/test_db_postgres.py -q -m requires_db
+20 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 71 source files
+
+The 20 `requires_db` tests are the SQL half of the repository and lease contracts; the
+in-memory half runs in the fast lane. A skipped `requires_db` test is never reported as a
+pass (ADR-0013 §4).
+
+===========================================================================
+5. Defects found by running against a real server
+===========================================================================
+Each of these was invisible to the in-memory implementation and is now covered by a test:
+
+1. **The lease deadlocked instead of refusing.** `PostgresLease.acquire` left its statement
+   uncommitted, so a second acquirer blocked on the row lock rather than being told the
+   lease was taken — the opposite of mutual exclusion. Lease operations now commit
+   immediately, because a lease held inside an uncommitted transaction is invisible to
+   every other worker.
+2. **Event idempotency raised instead of ignoring.** `ON CONFLICT (event_id) DO NOTHING`
+   only consults the named arbiter index, so a replay of the same event (same id *and*
+   same seq) raised a UniqueViolation on the primary key. The insert now uses an
+   untargeted `DO NOTHING` and re-establishes the distinction explicitly: already-present
+   id is idempotent, a sequence owned by a *different* event is a loud fork.
+3. **psycopg 3 does not adapt `dict` to `jsonb`.** Payload, attributes and alert context
+   are now wrapped explicitly rather than relying on implicit adaptation.
+4. **`events()` reconstructed events without their envelope**, so reading back a stored
+   event failed validation. The query now selects the envelope columns and the repository
+   stamps the mode back on, because the database boundary *is* the mode.

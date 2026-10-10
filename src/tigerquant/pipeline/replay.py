@@ -45,6 +45,15 @@ from tigerquant.events.portfolio import LedgerMarked
 from tigerquant.events.risk import AlertRaised, RiskEvaluated, RiskStateChanged
 from tigerquant.evidence.ingest import fact_from_bar
 from tigerquant.evidence.snapshot import SnapshotBuilder
+from tigerquant.evidence.sources import (
+    DEFAULT_SOURCES,
+    LicenseScope,
+    Reliability,
+    Source,
+    SourceKind,
+    SourceRegistry,
+)
+from tigerquant.evidence.staleness import StalenessPolicy
 from tigerquant.evidence.store import EvidenceStore
 from tigerquant.execution.broker import BrokerOrderState
 from tigerquant.execution.fake_broker import DeterministicFakeBroker
@@ -156,8 +165,20 @@ class ReplayEngine:
         self._clock = SimulatedClock(fixture.start)
         self._ids = IdFactory(self._caps.namespace, self._clock)
         self._session = session or TradingSession()
-        self._store = EvidenceStore()
-        self._builder = SnapshotBuilder(self._store, max_age_seconds=fixture.max_fact_age_seconds)
+        # Provenance is enforced: the fixture registers exactly one synthetic source, and a
+        # fact from any other source cannot enter the store (CR-05).
+        self._fixture_source = Source(
+            source_id=f"fixture:{fixture.scenario_id}",
+            kind=SourceKind.SYNTHETIC,
+            publisher="TigerQuant scenario fixture",
+            reliability=Reliability.UNVERIFIED,
+            license_scope=LicenseScope.PUBLIC,
+            notes="Deterministic synthetic bars; not market data and not trading advice.",
+        )
+        self._sources = SourceRegistry((*DEFAULT_SOURCES, self._fixture_source))
+        self._store = EvidenceStore(self._sources)
+        self._staleness = StalenessPolicy.uniform(fixture.max_fact_age_seconds)
+        self._builder = SnapshotBuilder(self._store, staleness=self._staleness)
         self._ledger = PortfolioLedger(initial_cash=fixture.initial_cash)
         self._projection = OrderProjection()
         self._gate = StartupGate()
@@ -360,6 +381,7 @@ class ReplayEngine:
             current_weight=self._current_weight_for(raw),
             mark_price=self._mark_for_raw(raw),
             equity=equity,
+            staleness=self._staleness,
         )
 
         try:

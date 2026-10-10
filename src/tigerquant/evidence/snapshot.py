@@ -16,10 +16,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from tigerquant.core.canonical import digest_of
 from tigerquant.core.enums import SnapshotCompleteness
 from tigerquant.events.base import AwareUTC, NonEmptyStr
+from tigerquant.evidence.staleness import StalenessPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from tigerquant.evidence.staleness import StalenessPolicy
     from tigerquant.evidence.store import EvidenceStore
 
 __all__ = ["EvidenceSnapshot", "SnapshotBuilder"]
@@ -60,20 +62,47 @@ class EvidenceSnapshot(BaseModel):
 
 
 class SnapshotBuilder:
-    """Builds snapshots from a store, with an explicit staleness horizon."""
+    """Builds snapshots from a store, with a per-category staleness policy."""
 
-    __slots__ = ("_max_age_seconds", "_store")
+    __slots__ = ("_staleness", "_store")
 
-    def __init__(self, store: EvidenceStore, *, max_age_seconds: int) -> None:
-        if max_age_seconds < 1:
-            msg = "max_age_seconds must be positive"
+    def __init__(
+        self,
+        store: EvidenceStore,
+        *,
+        staleness: StalenessPolicy | int | None = None,
+        max_age_seconds: int | None = None,
+    ) -> None:
+        if staleness is None and max_age_seconds is None:
+            msg = "SnapshotBuilder requires either 'staleness' or 'max_age_seconds'"
             raise ValueError(msg)
+        if staleness is not None and max_age_seconds is not None:
+            msg = "pass either 'staleness' or 'max_age_seconds', not both"
+            raise ValueError(msg)
+
+        # Normalise to exactly one type before storing, so nothing downstream has to
+        # consider the "an int was passed" case.
+        if isinstance(staleness, StalenessPolicy):
+            policy = staleness
+        elif isinstance(staleness, int) and not isinstance(staleness, bool):
+            policy = StalenessPolicy.uniform(staleness)
+        elif max_age_seconds is not None:
+            policy = StalenessPolicy.uniform(max_age_seconds)
+        else:  # pragma: no cover - guarded by the checks above
+            msg = "SnapshotBuilder requires a StalenessPolicy or a number of seconds"
+            raise ValueError(msg)
+
         self._store = store
-        self._max_age_seconds = max_age_seconds
+        self._staleness: StalenessPolicy = policy
+
+    @property
+    def staleness(self) -> StalenessPolicy:
+        return self._staleness
 
     @property
     def max_age_seconds(self) -> int:
-        return self._max_age_seconds
+        """The conservative default horizon, for the snapshot record."""
+        return self._staleness.default_seconds
 
     def build(
         self,
@@ -84,13 +113,17 @@ class SnapshotBuilder:
     ) -> EvidenceSnapshot:
         """Resolve ``fact_ids`` at ``as_of`` and freeze the outcome."""
         ordered = tuple(dict.fromkeys(fact_ids))
-        report = self._store.resolve(ordered, as_of=as_of, max_age_seconds=self._max_age_seconds)
+        report = self._store.resolve(ordered, as_of=as_of, staleness=self._staleness)
 
         if report.missing or report.stale:
             completeness = SnapshotCompleteness.INCOMPLETE
         elif report.contradictions:
             completeness = SnapshotCompleteness.CONTRADICTORY
         elif not ordered:
+            completeness = SnapshotCompleteness.INCOMPLETE
+        elif not report.usable_facts:
+            # Everything cited resolved, but only injection-flagged content remains.
+            # Flagged content is stored truthfully and still cannot admit a trade.
             completeness = SnapshotCompleteness.INCOMPLETE
         else:
             completeness = SnapshotCompleteness.COMPLETE
@@ -101,16 +134,24 @@ class SnapshotBuilder:
         reasons.extend(f"unresolved evidence id: {fact_id}" for fact_id in report.missing)
         reasons.extend(f"stale evidence id: {fact_id}" for fact_id in report.stale)
         reasons.extend(f"contradicted evidence id: {fact_id}" for fact_id in report.contradictions)
+        if ordered and report.ok and not report.usable_facts:
+            reasons.append(
+                "every cited document is prompt-injection-flagged; flagged content cannot "
+                "admit a trade"
+            )
 
-        # The digest covers the resolved content, not just the ids, so two snapshots
-        # with the same ids but different fact content can never share an id.
+        # The digest covers the resolved *effective* content, not just the ids, so two
+        # snapshots with the same ids but different content can never share an id.
         material = {
             "as_of": as_of,
-            "max_age_seconds": self._max_age_seconds,
+            "staleness": self._staleness,
             "facts": [
-                {"fact_id": res.fact.fact_id, "digest": res.fact.digest()}
-                for res in report.resolutions.values()
-                if res.fact is not None
+                {
+                    "fact_id": res.effective.fact_id if res.effective else None,
+                    "cited_as": fact_id,
+                    "digest": res.effective.digest() if res.effective else None,
+                }
+                for fact_id, res in report.resolutions.items()
             ],
             "completeness": completeness,
         }
@@ -121,7 +162,7 @@ class SnapshotBuilder:
             fact_ids=ordered,
             digest=digest,
             completeness=completeness,
-            max_age_seconds=self._max_age_seconds,
+            max_age_seconds=self._staleness.default_seconds,
             reasons=tuple(reasons),
             notes=tuple(notes),
         )

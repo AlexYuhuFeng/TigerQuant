@@ -1,0 +1,72 @@
+# TigerQuant — containerised PostgreSQL for every platform.
+#
+#   docker compose -f deploy/compose.yaml up -d
+#   docker compose -f deploy/compose.yaml ps
+#   docker compose -f deploy/compose.yaml down          # keeps the volume
+#   docker compose -f deploy/compose.yaml down -v       # destroys the data
+#
+# The application connects over TCP (localhost:5432), never through a platform-specific
+# socket or named pipe, which is what makes the same commands work on Windows, macOS and
+# Linux.
+#
+# Isolation (AGENTS.md invariant 2): one DATABASE and one ROLE per mode, created by the
+# init script in deploy/postgres-init/. There are no grants between them, so a process
+# running in one mode holds a credential that cannot reach another mode's data — a
+# stronger partition than a schema or a name prefix.
+
+name: tigerquant
+
+services:
+  postgres:
+    # The official Docker Hub library image, consumed through AWS ECR Public.
+    #
+    # Why not `postgres:17.6-alpine` directly: docker.io is unreachable from the
+    # development network (and from many corporate and mainland-China networks), while
+    # public.ecr.aws mirrors the *same* official library image. Using the mirror keeps the
+    # deployment identical on hosts that can and cannot reach Docker Hub, instead of making
+    # registry access a platform-specific prerequisite.
+    #
+    # Pin the digest once pulled, so a rebuilt image cannot silently change:
+    #   docker image inspect --format '{{index .RepoDigests 0}}' \
+    #     public.ecr.aws/docker/library/postgres:17.6-alpine
+    image: public.ecr.aws/docker/library/postgres:17.6-alpine
+    container_name: tigerquant-postgres
+    restart: unless-stopped
+    environment:
+      # Development credentials only. They are NOT secrets: they exist solely to open a
+      # local, loopback-only database, they are committed on purpose so that a fresh
+      # clone works with one command, and nothing outside this file uses them.
+      # A real deployment supplies credentials through a secret manager and never
+      # through this file (AGENTS.md "Security").
+      POSTGRES_USER: tq_bootstrap
+      POSTGRES_PASSWORD: tq_local_development_only
+      POSTGRES_DB: postgres
+      # Deterministic collation so ORDER BY on text is stable across platforms.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      # Bound to loopback only: the database is never exposed to the network.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - tigerquant-pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tq_bootstrap -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # Fail fast rather than silently buffering: a database that accepts writes it cannot
+    # persist would break gate 15 (outage must be visible and must stop new exposure).
+    stop_grace_period: 30s
+    command:
+      - postgres
+      - -c
+      - synchronous_commit=on
+      - -c
+      - max_connections=50
+      - -c
+      - log_min_duration_statement=1000
+
+volumes:
+  tigerquant-pgdata:
+    name: tigerquant-pgdata

@@ -26,6 +26,7 @@ from tigerquant.core.enums import Action, ReasonCode
 from tigerquant.core.errors import DecisionValidationError
 from tigerquant.core.money import ZERO, q_weight, to_decimal
 from tigerquant.decision.contract import TradeDecision, validate_against_schema
+from tigerquant.evidence.staleness import StalenessPolicy
 
 if TYPE_CHECKING:
     from tigerquant.evidence.snapshot import EvidenceSnapshot
@@ -48,6 +49,14 @@ class DecisionContext:
     #: Latest admissible mark for the targeted instrument, if available.
     mark_price: Decimal | None = None
     equity: Decimal | None = None
+    #: The policy the snapshot was built with. Re-resolving with the same policy is a
+    #: defence-in-depth check that the cited evidence is still admissible.
+    staleness: StalenessPolicy | None = None
+
+    def staleness_policy(self) -> StalenessPolicy:
+        if self.staleness is not None:
+            return self.staleness
+        return StalenessPolicy.uniform(self.snapshot.max_age_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,13 +174,23 @@ class DecisionValidator:
         report = self._store.resolve(
             decision.evidence_ids,
             as_of=context.snapshot.as_of,
-            max_age_seconds=context.snapshot.max_age_seconds,
+            staleness=context.staleness_policy(),
         )
         if not report.ok:
             reason = report.reason_code() or ReasonCode.EVIDENCE_UNRESOLVED
             raise DecisionValidationError(
                 f"evidence resolution failed: {report.summary()}", reason, stage="evidence"
             )
+        if decision.evidence_ids and not report.usable_facts:
+            # Evidence was cited, everything resolved, but only injection-flagged content
+            # remains. Flagged content is stored truthfully; it cannot justify a trade.
+            # (Citing nothing at all is handled by the requires-evidence check above, so a
+            # HOLD or NO_TRADE with no evidence is not caught here.)
+            msg = (
+                "every cited document is prompt-injection-flagged; flagged content cannot "
+                "admit a trade (no evidence means NO_TRADE)"
+            )
+            raise DecisionValidationError(msg, ReasonCode.SNAPSHOT_INCOMPLETE, stage="evidence")
 
     # -- stage 5: recomputation --------------------------------------------------
 

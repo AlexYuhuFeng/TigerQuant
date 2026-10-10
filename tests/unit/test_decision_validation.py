@@ -19,6 +19,7 @@ from tigerquant.decision.validation import DecisionContext, DecisionValidator
 from tigerquant.events.market import MarketBar
 from tigerquant.evidence.ingest import fact_from_bar
 from tigerquant.evidence.snapshot import SnapshotBuilder
+from tigerquant.evidence.sources import default_test_registry
 from tigerquant.evidence.store import EvidenceStore
 
 AT = dt.datetime(2026, 3, 2, 14, 40, tzinfo=dt.UTC)
@@ -129,7 +130,7 @@ class TestParsing:
 
 class TestValidator:
     def _fixture(self) -> tuple[EvidenceStore, SnapshotBuilder, str, str]:
-        store = EvidenceStore()
+        store = EvidenceStore(default_test_registry())
         builder = SnapshotBuilder(store, max_age_seconds=MAX_AGE)
         fact = fact_from_bar(_bar("600.00"), max_age_seconds=MAX_AGE)
         store.add(fact)
@@ -289,7 +290,7 @@ class TestValidator:
         assert excinfo.value.reason_code is ReasonCode.NUMERIC_DISAGREEMENT
 
     def test_unknown_evidence_fails_against_an_incomplete_snapshot(self) -> None:
-        store = EvidenceStore()
+        store = EvidenceStore(default_test_registry())
         builder = SnapshotBuilder(store, max_age_seconds=MAX_AGE)
         snapshot = builder.build(as_of=AT, fact_ids=())
         assert snapshot.completeness.value == "INCOMPLETE"

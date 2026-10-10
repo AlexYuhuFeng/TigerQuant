@@ -34,6 +34,7 @@ dev = [
   "detect-secrets==1.5.0",
 ]
 broker = ["tigeropen==3.8.0"]        # CR-02/CR-03
+db = ["psycopg[binary]==3.2.12"]     # projection store (ADR-0013)
 engine = ["nautilus_trader==1.231.0"]  # CR-04
 llm = ["litellm==1.104.2"]            # CR-06
 dashboard = [                          # CR-08
@@ -59,6 +60,7 @@ markers = [
   "fault: failure-injection tests",
   "integration: multi-component integration tests",
   "requires_broker: needs Tiger credentials (never run in CI fast lane)",
+  "requires_db: needs a PostgreSQL server (docker compose -f deploy/compose.yaml up -d)",
   "requires_engine: needs nautilus_trader installed",
   "requires_llm: needs a model provider",
 ]
@@ -107,7 +109,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002", "PLR0915", "SLF001", "DTZ001", "DTZ005"]
-"tools/**" = ["T201", "S310", "PLR2004", "BLE001", "PTH123"]
+"tools/**" = ["T201", "S310", "PLR2004", "BLE001", "PTH123", "PLR0915", "S105", "PLR0913"]
 "src/tigerquant/cli.py" = ["T201"]
 
 [tool.ruff.lint.isort]

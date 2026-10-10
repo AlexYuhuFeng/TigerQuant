@@ -30,6 +30,7 @@ from tigerquant.core.ids import IdFactory
 from tigerquant.events.emitter import EventEmitter
 from tigerquant.events.journal import MemoryJournal
 from tigerquant.evidence.snapshot import SnapshotBuilder
+from tigerquant.evidence.sources import SourceRegistry, default_test_registry
 from tigerquant.evidence.store import EvidenceStore
 from tigerquant.execution.fake_broker import DeterministicFakeBroker
 from tigerquant.execution.intent import OrderProjection
@@ -94,8 +95,14 @@ def ids(clock: SimulatedClock) -> IdFactory:
 
 
 @pytest.fixture
-def store() -> EvidenceStore:
-    return EvidenceStore()
+def sources() -> SourceRegistry:
+    """A registry that knows the synthetic sources the tests use."""
+    return default_test_registry()
+
+
+@pytest.fixture
+def store(sources: SourceRegistry) -> EvidenceStore:
+    return EvidenceStore(sources)
 
 
 @pytest.fixture

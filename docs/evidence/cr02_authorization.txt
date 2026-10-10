@@ -1,0 +1,120 @@
+TigerQuant CR-02 verification evidence — Tiger PAPER read-only authorization
+Generated: see the git commit this file was added in
+Implementation status: PAPER_VERIFIED for authorization and account discovery.
+                      Order submission is NOT implemented (CR-03) and is not authorized.
+
+===========================================================================
+1. Authorization server metadata (unauthenticated discovery, 2026-10-10)
+===========================================================================
+$ python -c "urllib.request.urlopen('https://openapi-oauth2.tigerfintech.com/.well-known/oauth-authorization-server')"
+
+issuer                            https://openapi-oauth2.tigerfintech.com
+authorization_endpoint            https://openapi-oauth2.tigerfintech.com/oauth2/authorize
+token_endpoint                    https://openapi-oauth2.tigerfintech.com/oauth2/token
+registration_endpoint             https://openapi-oauth2.tigerfintech.com/oauth2/register
+device_authorization_endpoint     https://openapi-oauth2.tigerfintech.com/oauth2/device_authorization
+revocation_endpoint               https://openapi-oauth2.tigerfintech.com/oauth2/revoke
+scopes_supported                  api.basic:read, api.quote:read, api.account:read,
+                                  api.trade:read, api.trade:write
+grant_types_supported             authorization_code, refresh_token,
+                                  urn:ietf:params:oauth:grant-type:device_code
+code_challenge_methods_supported  S256
+
+Note: there is NO separate paper/sandbox authorization server.
+      https://openapi-sandbox.tigerfintech.com/.well-known/oauth-authorization-server -> 404.
+      The sandbox host is a *business gateway*, not an identity environment.
+
+===========================================================================
+2. Authorization (loopback redirect + PKCE S256, performed by the owner)
+===========================================================================
+$ python tools/tiger_login.py --flow browser --timeout 900
+
+TOKEN_HOME=<workspace>/.secrets/tiger
+SESSION={"client_id": "<dynamic registration>", "environment": "GATEWAY",
+         "issuer": "https://openapi-oauth2.tigerfintech.com",
+         "scopes": "api.account:read api.basic:read api.quote:read api.trade:read",
+         "token": "***REDACTED***"}
+FLOW_USED=browser
+GRANTED_SCOPE=api.account:read api.basic:read api.quote:read api.trade:read
+HAS_REFRESH_TOKEN=True
+EXPIRES_IN_SECONDS=3598
+LOGIN=ok
+
+Enforcement observed:
+  * Requested scope set contains four READ scopes and never api.trade:write.
+  * The GRANTED scope set echoed by the server is exactly the requested set.
+    Asserted in code by TigerQuantOAuthSession._assert_no_write_scope, which refuses a
+    token whose granted scope includes a write scope even if we did not ask for it.
+  * Consequence: the credential held by this process cannot place an order, whatever any
+    module in the repository does with it. This is a credential-level control, independent
+    of the single-write-path rule in ADR-0007.
+  * The token is stored under <workspace>/.secrets/tiger, which is git-ignored, and is
+    never printed, logged or copied into the audit journal.
+  * Dynamic client registration (RFC 7591) was used: no pre-registered application, and no
+    private key or tiger_id is involved. `surface="tigerquant"` gives the grant its own
+    identity on the owner's authorized-apps page so it can be revoked independently.
+
+===========================================================================
+3. Account discovery and the paper/live guard
+===========================================================================
+$ python tools/tiger_login.py --check
+
+STATE=authorized
+ACCOUNT_VERIFIED=false
+ACCOUNT_DETAIL=no account was configured and the broker reports 2 accounts; refusing to
+               guess which one to use
+ACCOUNT_SEEN={"account": "***1346",          "account_type": "STANDARD",
+              "capability": "RegTMargin", "status": "Funded"}
+ACCOUNT_SEEN={"account": "*************2713", "account_type": "PAPER",
+              "capability": "RegTMargin", "status": "Funded"}
+
+This is the single most important observation in this file: **one OAuth grant returned
+both a funded live-capable account and a paper account.** The token is therefore NOT
+paper-bound, and the guard — not the host name, not the scope, not the token — is what
+keeps this project paper-only.
+
+The guard refused to choose, which is the designed behaviour.
+
+$ python tools/tiger_login.py --check --select-paper
+
+ACCOUNT_VERIFIED=true
+ACCOUNT_DETAIL=selected the unique PAPER account *************2713
+              (capability=RegTMargin, status=Funded)
+ACCOUNT_SEEN={"account": "***1346", "account_type": "STANDARD", ...}
+ACCOUNT_SEEN={"account": "*************2713", "account_type": "PAPER", ...}
+ACCOUNT_STORED=*************2713
+
+Guard rules enforced (src/tigerquant/adapters/tiger/guard.py):
+  1. the account must appear in the broker's own get_managed_accounts() response;
+  2. accountType must be 'PAPER' — an absent or unrecognised type is a refusal, never a pass;
+  3. the number must match Tiger's documented paper shape (all digits, >= 17 characters);
+  4. the status must be a usable one;
+  5. with several PAPER accounts the guard refuses and a human must choose.
+The account number is stored outside Git (<workspace>/.secrets/tiger/account) and is
+reported only in masked form. It is never written to the repository.
+
+===========================================================================
+4. A wrong-environment attempt, recorded because it is instructive
+===========================================================================
+Pointing the client at the separate sandbox gateway while holding a token issued by the
+production authorization server produced:
+
+    ResponseException: response sign verify failed
+
+Responses are RSA-signed and verified with a public key that is bound to the environment.
+Gateway, socket endpoint and verification key must move together. This is why the default
+is GATEWAY: a real Tiger paper account lives on the ordinary gateway, and paper-versus-live
+is decided by the account, not by the host. tools/tiger_login.py --environment sandbox
+selects the developer sandbox explicitly.
+
+===========================================================================
+5. What is NOT claimed here
+===========================================================================
+* No order has been placed, modified or cancelled. CR-02 is read-only, and the credential
+  in use could not place one even if asked.
+* No market-data entitlement is verified. Quote permissions are purchased separately and
+  belong to CR-05 ingestion, not to this file.
+* The refresh path has not been observed to complete (the token was still valid). It is
+  implemented by the SDK, not by us, and is exercised in CR-03.
+* Cash, positions and open orders have not yet been reconciled against a broker snapshot;
+  that is the remaining CR-02 acceptance item and requires the read-only client.
