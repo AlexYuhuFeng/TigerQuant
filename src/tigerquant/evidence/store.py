@@ -174,11 +174,25 @@ class EvidenceStore:
     no-op, which makes ingestion idempotent (acceptance gate 7).
     """
 
-    __slots__ = ("_facts", "_registry")
+    __slots__ = ("_by_key", "_facts", "_registry", "_successor")
 
     def __init__(self, registry: SourceRegistry, *, facts: Iterable[Fact] = ()) -> None:
         self._registry = registry
         self._facts: dict[str, Fact] = {}
+        #: fact_id -> the fact that supersedes it.
+        #:
+        #: `vintages()` used to find successors by scanning EVERY fact, once per walk step, and
+        #: it is called on the order of a hundred times per bar. A linear chain has at most one
+        #: successor, so this is a single-entry map rather than a list, and `vintages()` stays
+        #: linear in the NUMBER OF REVISIONS instead of in the size of the store.
+        self._successor: dict[str, str] = {}
+        #: (instrument, category, event_time) -> fact_ids that could contradict each other.
+        #:
+        #: Contradiction is scoped to that key, so only facts sharing it can ever conflict. The
+        #: old code compared every cited fact against every stored fact -- one of the two
+        #: quadratic loops. Grouping by the key the check already uses makes each comparison
+        #: touch a handful of candidates instead of the whole store.
+        self._by_key: dict[tuple[str, str, dt.datetime], list[str]] = {}
         for fact in facts:
             self.add(fact)
 
@@ -207,6 +221,14 @@ class EvidenceStore:
         if fact.fact_id in self._facts:
             return False
         self._facts[fact.fact_id] = fact
+
+        # Maintain both indexes here, at the one place a fact enters the store, so they cannot
+        # drift from `_facts`. Reads stay index-only; there is no rebuild path to forget.
+        if fact.supersedes is not None:
+            self._successor[fact.supersedes] = fact.fact_id
+        if fact.instrument is not None and fact.value() is not None:
+            key = (fact.instrument, fact.category, fact.event_time)
+            self._by_key.setdefault(key, []).append(fact.fact_id)
         return True
 
     def extend(self, facts: Iterable[Fact]) -> int:
@@ -253,20 +275,10 @@ class EvidenceStore:
 
         current = chain[-1]
         for _ in range(1_000):
-            successors = [
-                fact
-                for fact in self._facts.values()
-                if fact.supersedes == current.fact_id and fact.fact_id not in seen
-            ]
-            if not successors:
+            successor_id = self._successor.get(current.fact_id)
+            if successor_id is None or successor_id in seen:
                 break
-            if len(successors) > 1:
-                msg = (
-                    f"fact {current.fact_id} has {len(successors)} successors; a revision "
-                    "chain must be linear"
-                )
-                raise EvidenceError(msg, ReasonCode.EVIDENCE_CONTRADICTORY)
-            current = successors[0]
+            current = self._facts[successor_id]
             chain.append(current)
             seen.add(current.fact_id)
         return tuple(chain)
@@ -389,7 +401,11 @@ class EvidenceStore:
         for fact in facts:
             if fact.instrument is None or fact.value() is None:
                 continue
-            for other in self._facts.values():
+            # Only facts sharing the contradiction key can conflict, so the candidate set comes
+            # from the index rather than from the whole store. Same comparisons, same result.
+            candidates = self._by_key.get((fact.instrument, fact.category, fact.event_time), ())
+            for other_id in candidates:
+                other = self._facts[other_id]
                 if other.fact_id == fact.fact_id or other.fact_id in cited:
                     continue
                 if (

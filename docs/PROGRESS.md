@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: fix the O(n^2) replay scaling; CR-03 still awaits the owner's consent page
+Current CR: isolate the snapshot canonicalisation cost; CR-03 awaits the owner's consent page
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -608,6 +608,51 @@ bar, but that is a hypothesis and has *not* been investigated.
 **Consequence for the gate, said plainly:** stability is demonstrated for one full session and is
 reproducible; a multi-day run needs the quadratic behaviour fixed first. Not extrapolated from a
 short run.
+
+### 2026-10-10 — CR-09 part 5: the O(n^2) replay scaling, two of three causes fixed
+
+Full evidence: `docs/evidence/cr09_scaling_investigation.txt`. **Partial, and recorded as
+partial**: two causes are fixed and measured, a third is localised but NOT isolated.
+
+**I profiled before touching anything**, because the previous writeup named "the snapshot builder
+or the as-of fact view" as a hypothesis, and a hypothesis is not a cause.
+
+**Cause 1 — `vintages()` scanned every fact, per walk step.** It found successors by scanning
+`self._facts.values()`, and was called **20,888 times in a 200-bar run** — about a hundred times
+per bar. A revision chain must be linear, so at most one successor exists: `self._successor:
+dict[str, str]`, maintained in `add()`.
+
+**Cause 2 — `_find_contradictions()` compared every cited fact against every fact.** The inner
+loop was over the whole store, though contradiction is scoped to
+`(instrument, category, event_time)`. Now `self._by_key`, also maintained in `add()`. Both indexes
+live at the single place a fact enters the store, so there is no rebuild path to forget.
+
+| bars | before | after |
+|---|---|---|
+| 100 | 0.54s | 0.53s |
+| 200 | 1.76s | 1.46s |
+| 400 | 8.20s | **5.31s** |
+| 800 | — | 16.38s |
+
+Real (400 bars is 35% faster) but **still not linear**: 2.7x, 3.6x, 3.1x per doubling where
+linear would be ~2x.
+
+**Cause 3 — NOT ISOLATED.** Re-profiling puts the remaining cost in **canonicalisation**, not the
+fact store: `to_canonical` 4.378s over 2.85M calls, driven by `snapshot.build()` once per bar.
+Calls per bar are roughly *constant* (~7,100 canonical nodes), yet the *rate* falls ~4x between
+the 100-bar and 800-bar runs. A constant number of digest calls whose per-call cost grows is not
+explained by anything found.
+
+**Deliberately not fixed.** The snapshot digest is load-bearing provenance (invariant 6) and sits
+inside the journal digest CR-01's baseline pins. Changing what is canonicalised would move that
+baseline, and a change made at the end of a session to make a benchmark faster is exactly the
+change that should not be made quickly.
+
+**A mistake worth recording:** the first attempt broke 49 tests and errored 116 more.
+`EvidenceStore` declares `__slots__`, and the two new attributes were not in it. The failure was
+immediate and total, which is the good outcome.
+
+15 new tests pin both indexes, so a future change cannot silently reintroduce the scans.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

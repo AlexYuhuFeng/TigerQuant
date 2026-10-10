@@ -1,0 +1,127 @@
+TigerQuant CR-09 evidence (part 5) - investigating the O(n^2) replay scaling
+Generated: see the git commit this file was added in
+
+STATUS: PARTIAL. Two of at least three causes are fixed and measured; one remains and is NOT
+isolated. Recorded in that state rather than claimed as solved.
+
+===========================================================================
+1. Why this matters
+===========================================================================
+docs/evidence/cr09_long_run.txt recorded that the replay path is quadratic in bars: a
+five-session run (1950 bars) did not finish in ten minutes, so "stability over representative
+periods" could only be demonstrated for a single session. The harness is built for longer runs
+and the pipeline cannot yet support them.
+
+Profiling was done FIRST, because the previous writeup named "the snapshot builder or the as-of
+fact view" as a hypothesis and a hypothesis is not a cause.
+
+===========================================================================
+2. Cause 1 (FIXED): `vintages()` scanned every fact, per walk step
+===========================================================================
+EvidenceStore.vintages() located successors by scanning `self._facts.values()`:
+
+    successors = [f for f in self._facts.values() if f.supersedes == current.fact_id ...]
+
+`vintages()` was called 20,888 times in a 200-bar run -- about a hundred times per bar -- so that
+scan was O(facts) a hundred times per bar.
+
+Fix: `self._successor: dict[str, str]`, maintained in `add()`. A revision chain must be linear, so
+at most one successor exists and a single-entry map is sufficient. The forward walk is now linear
+in the number of REVISIONS rather than in the size of the store.
+
+===========================================================================
+3. Cause 2 (FIXED): `_find_contradictions()` compared every cited fact against every fact
+===========================================================================
+The second loop was nested over the whole store:
+
+    for fact in facts:                       # cited
+        for other in self._facts.values():   # EVERYTHING
+            if other.instrument == fact.instrument and other.category == fact.category ...
+
+Contradiction is scoped to `(instrument, category, event_time)`, so only facts sharing that key
+can ever conflict -- but the loop did not use that.
+
+Fix: `self._by_key: dict[tuple[str, str, datetime], list[str]]`, maintained in `add()`. The
+candidate set now comes from the index. Same comparisons, same result, a handful of candidates
+instead of the whole store.
+
+Both indexes are maintained in the ONE place a fact enters the store, so there is no rebuild path
+to forget.
+
+A MISTAKE WORTH RECORDING: the first attempt broke 49 tests and errored 116 more. `EvidenceStore`
+declares `__slots__`, and the two new attributes were not in it. The failure was immediate and
+total, which is the good outcome; the point is that the tests caught a half-applied change rather
+than it reaching a run.
+
+===========================================================================
+4. Measured effect of causes 1 and 2
+===========================================================================
+                before        after
+    100 bars     0.54s         0.53s
+    200 bars     1.76s         1.46s
+    400 bars     8.20s         5.31s
+    800 bars        --        16.38s
+
+    scaling per doubling, after:  2.7x, 3.6x, 3.1x
+
+Real improvement -- 400 bars is 35% faster -- but still NOT linear. Linear work would roughly
+double per doubling; this is between 2.7x and 3.6x. A third cause remains.
+
+===========================================================================
+5. Cause 3 (NOT ISOLATED): canonicalisation cost per node grows with the run
+===========================================================================
+Re-profiling at 400 bars puts the remaining cost somewhere unexpected:
+
+    2,849,709 calls  4.378s  core/canonical.py:29 (to_canonical)
+       81,798 calls  4.922s  core/canonical.py:88 (digest_of)
+          400 calls  5.691s  evidence/snapshot.py:107 (build)
+
+So the cost is in DIGESTING, not in the fact store. `snapshot.build()` runs once per bar and
+canonicalises its material, whose "facts" entry has one member per cited fact plus the whole
+staleness policy.
+
+What the numbers show, and what they do not:
+
+  * calls per bar are roughly CONSTANT (about 7,100 canonical nodes and 204 digests per bar), so
+    the number of digest operations is linear in bars;
+  * but the RATE falls roughly 4x between the 100-bar and 800-bar runs (about 1.34M canonical
+    nodes/second down to about 347K), so something inside the traversal is growing.
+
+A constant number of digest calls whose per-call cost grows is not explained by anything found
+so far. The three candidates, none confirmed:
+
+  1. `to_canonical` recursing into a structure that grows during the run;
+  2. the staleness policy being canonicalised per bar and being larger than it appears;
+  3. allocator or GC pressure from the growing store, which would look like this in a profile
+     without appearing as a Python-level hotspot.
+
+**This is deliberately NOT fixed.** The snapshot digest is load-bearing provenance (AGENTS.md
+invariant 6), and it sits inside the journal digest that CR-01's baseline pins to
+`5ac9de744ae629f15e5c79a4289f7f60a4db39760431324cfd5899c60c6439d3`. Changing what is canonicalised
+would change that baseline, and a change made at the end of a session to make a benchmark faster
+is exactly the change that should not be made quickly. It needs its own investigation with the
+snapshot digest's stability verified before and after.
+
+===========================================================================
+6. Consequence for the CR-09 gate, unchanged by this work
+===========================================================================
+One full US equity session (390 bars, 6.50h of market time) still runs clean and reproducibly,
+and that remains the demonstrated result. A MULTI-DAY run is still not possible, now for a
+partially-understood reason rather than an entirely unknown one. Two causes are eliminated; one
+is localised to canonicalisation and quantified.
+
+===========================================================================
+7. Test results
+===========================================================================
+$ python -m pytest tests -q
+761 passed        (all existing evidence-store, snapshot and replay suites unchanged)
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 95 source files
+
+The unchanged suites are the evidence that the two indexes preserve behaviour: `vintages()`,
+`resolve()`, contradiction detection and snapshot digests all have their own tests, and none
+needed changing.
