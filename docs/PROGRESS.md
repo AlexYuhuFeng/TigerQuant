@@ -1,8 +1,9 @@
 # Durable progress state
 
 Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and tested;
-a real paper round trip is blocked on a write-scoped grant). CR-05 substantially delivered.
-Current CR: CR-09 wiring (projection repository into the pipelines) — offline work
+a real paper round trip is blocked on a write-scoped grant). CR-09 partial (projector and
+drift check verified against real PostgreSQL). CR-05 substantially delivered.
+Current CR: continue CR-09 (fills/positions projection, scheduling), CR-04, CR-06
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -149,6 +150,43 @@ activity, so CR-07 adds the accumulator and the limits that read it.
 **Why CR-07 had to precede CR-03:** submitting orders under a policy that bounds only a single
 order at a time would mean having operated without session limits, and the evidence would show it.
 
+### 2026-10-10 — CR-09 partial: journal projection and drift detection
+
+Full evidence: `docs/evidence/cr09_projection.txt`.
+
+ADR-0013 claimed the journal is authoritative and the database holds *rebuildable*
+projections. Until now that was a claim about intent. `db/projector.py` makes it a claim about
+behaviour: it reconstructs the relational tables from the journal alone, and compares what the
+journal implies against what the database says.
+
+Verified against real PostgreSQL: 31/31 events projected, 5 order rows, 6 portfolio marks,
+**cash 95179.48** — exactly the figure in CR-01's evidence, which is the only reason to trust
+the projection. Re-running wrote nothing and changed nothing.
+
+**Two bugs found, both by guards that already existed:**
+
+1. **A replayed projection regressed a completed order back to `CREATED`.** The fold starts
+   fresh each pass, so the journal's first event re-emitted `CREATED` for an order the venue
+   had already filled. Writing unconditionally would have silently rewound order state on
+   every replay. The repository's terminal-state guard raised
+   *"order … is terminal (FILLED) and cannot move to CREATED"*. Now a snapshot is written only
+   when its event is newly appended, or when the row is genuinely missing.
+2. **`EventBase.payload` is a method, not an attribute.** `getattr(event, "payload", {})`
+   returns a bound method — truthy — so the failure surfaced far from its cause as
+   `'function' object has no attribute 'get'`. Now a single `_payload()` helper.
+
+A third near-miss was avoided by **deleting** code rather than patching it: the first version
+reimplemented the order state machine and failed on the live run with
+`illegal order transition CREATED -> SUBMITTING`, because the machine requires
+`CREATED → RISK_APPROVED → SUBMITTING` and `RiskEvaluated` carries that transition. A second
+implementation had no way to know. The projector now folds with the existing
+`OrderProjection` and persists the result.
+
+Drift is reported and never repaired: a divergence means we do not know which record is wrong,
+and overwriting either would destroy the evidence needed to find out. The two directions are
+not treated as equivalent — extra rows in the database get their own note, because the journal
+is the record of authority and that direction means it was truncated or bypassed.
+
 ### 2026-10-10 — CR-03 partial: the guarded execution adapter (SIMULATED)
 
 Full evidence: `docs/evidence/cr03_execution_adapter.txt`.
@@ -244,11 +282,10 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Next actions
 
-1. **CR-03's last acceptance item is blocked on the owner**, not on code: a real paper round trip
-   needs a write-scoped OAuth grant (`api.trade:write`). Everything buildable without it is built
-   and tested. Meanwhile, continue with offline work.
-2. Wire the projection repository into the replay and paper pipelines so the database is actually
-   fed, and add the journal-versus-database drift check (CR-09 detector). This is the largest
-   piece of real remaining work that needs no external permission.
+1. **CR-09 continues.** Project fills, positions, facts, decisions and risk outcomes (only orders
+   and portfolio state are projected today). Add a rebuild command that drops and reconstructs
+   the projection tables, then schedule the drift check and alarm on it.
+2. **CR-03's last acceptance item is blocked on the owner**, not on code: a real paper round trip
+   needs a write-scoped OAuth grant (`api.trade:write`).
 3. CR-04 (NautilusTrader adapter) and CR-06 (provider-neutral model service) are buildable offline.
 4. CR-05's remaining gap: news/filing ingestion connectors.

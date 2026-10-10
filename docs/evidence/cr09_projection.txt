@@ -1,0 +1,125 @@
+TigerQuant CR-09 (partial) evidence - journal projection and drift detection
+Generated: see the git commit this file was added in
+
+Scope: the projector and the drift check. CR-09's full scope (long-duration harness,
+runbooks, drift *detector on a schedule*) is not finished; this is the foundation.
+
+===========================================================================
+1. What this makes true
+===========================================================================
+ADR-0013 claims the hash-chained journal is authoritative and PostgreSQL holds *rebuildable*
+projections. Until now that was a claim about intent. This module is what makes it a claim
+about behaviour: it reconstructs the relational tables from the journal alone, and it
+compares what the journal implies against what the database currently says.
+
+===========================================================================
+2. Live result against real PostgreSQL
+===========================================================================
+$ python -m tigerquant replay --fixture tests/fixtures/scenarios/trend_up.yaml \
+      --journal out/cr09_journal.jsonl
+sha256:eef80bb57d441168db0980caaa415da80cdb0f07a944f14db90b7990ed4b6153
+
+$ python -m tigerquant project out/cr09_journal.jsonl --mode BACKTEST
+mode BACKTEST: projected 31/31 event(s): 5 order row(s) written, 1 order(s) tracked
+(0 open), 6 portfolio mark(s); last sequence 30
+  consistent: 31 event(s), 1 order(s), cash 95179.48
+[exit code: 0]
+
+$ python -m tigerquant project out/cr09_journal.jsonl --mode BACKTEST    # again
+mode BACKTEST: projected 0/31 event(s); 31 already present: 0 order row(s) written,
+1 order(s) tracked (0 open), 0 portfolio mark(s); last sequence 30
+  consistent: 31 event(s), 1 order(s), cash 95179.48
+[exit code: 0]
+
+Rows actually in the database after both runs:
+$ docker exec tigerquant-postgres psql -U tq_backtest -d tq_backtest -t -c ...
+events=31   orders=1   portfolio_state=1   max_seq=30
+
+Two things to note:
+  * cash 95179.48 is exactly the figure recorded in docs/evidence/cr01_verification.txt
+    for this scenario. The projection agrees with the journal it came from, which is the
+    only reason to trust it.
+  * the second run wrote nothing and changed nothing. Idempotence is the property that
+    makes "just run it again" a safe answer to "did the projection get applied?" — and that
+    question usually cannot be answered honestly, because a crash can lose the
+    acknowledgement without losing the work.
+
+Cross-mode isolation still holds after this work:
+$ psql -U tq_backtest -d tq_paper -c "SELECT 1"
+FATAL: permission denied for database "tq_paper"
+
+===========================================================================
+3. Two bugs this work found, both caught by guards that already existed
+===========================================================================
+These are the most valuable output of the CR, and neither was visible from reading code.
+
+BUG 1 - a replayed projection regressed a completed order back to CREATED.
+  The fold starts from a fresh OrderProjection each pass, so on a second run the journal's
+  first event re-emitted CREATED for an order the venue had already filled. Writing
+  unconditionally would have silently rewound order state on every replay.
+  Caught by: the repository's terminal-state guard, which raised
+      "order ... is terminal (FILLED) and cannot move to CREATED"
+  Fixed by: writing a folded snapshot only when its event is newly appended, or when the
+  row is genuinely missing (the rebuild case). Replaying is now a no-op, and the test
+  asserts both the report counters AND that portfolio_state is unchanged.
+
+BUG 2 - EventBase.payload is a METHOD, not an attribute.
+  The natural-looking getattr(event, "payload", {}) returns a bound method, which is
+  truthy, so the failure surfaced much later as
+      AttributeError: 'function' object has no attribute 'get'
+  far from its cause. Replaced with a single _payload() helper that is the one place
+  knowing the difference.
+
+A THIRD near-miss, avoided by not writing a second state machine:
+  The order fold is NOT reimplemented in the projector. OrderProjection already owns the
+  state machine, and the projector folds with it and persists the result. The first version
+  of this module did reimplement it and failed on the live run with
+      illegal order transition CREATED -> SUBMITTING
+  because the state machine requires CREATED -> RISK_APPROVED -> SUBMITTING and
+  RiskEvaluated is the event carrying that transition — a fact a second implementation had
+  no way to know. The fix was to delete the duplicate, not to patch it.
+
+===========================================================================
+4. Drift is reported, never repaired
+===========================================================================
+check_drift() compares the journal with the database and returns a report. It does not
+adjust either side. A divergence means we do not know which record is wrong, and silently
+overwriting one with the other would destroy exactly the evidence needed to find out
+(ADR-0004 s5). A test asserts the database is untouched by a drift check.
+
+The two directions are NOT treated as equivalent. Extra events in the database that the
+journal lacks get a specific note: the journal is the record of authority, so that direction
+means a journal file was truncated or lost, or something wrote to the database directly.
+
+A gapped journal is refused outright rather than projected. A gap means events were lost, and
+a projection built from it would be confidently wrong — worse than one that is obviously
+incomplete. --allow-gaps exists only for inspecting a known-damaged journal.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+475 passed
+
+$ python -m pytest tests/unit/test_db_projector.py -q
+13 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 77 source files
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. Only orders and portfolio state are projected. Fills, positions, facts, decisions, risk
+   outcomes and alerts have repository methods but no projection yet. What is projected is
+   projected correctly; what is not projected is not claimed.
+2. The rebuild case (projections lost, events intact) is handled by the "row is missing"
+   branch, but there is no CLI command that drops and rebuilds the tables. Add one before
+   relying on it operationally.
+3. Drift detection runs when `project` is invoked. There is no schedule, no alerting and no
+   independent watchdog hook yet — that is the rest of CR-09.
+4. The 20 requires_db tests run against a real container; CI still has no remote runner, so
+   no linkable CI run exists.
