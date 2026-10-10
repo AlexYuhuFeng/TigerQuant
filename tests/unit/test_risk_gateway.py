@@ -21,6 +21,7 @@ from tigerquant.market.session import TradingSession
 from tigerquant.portfolio.ledger import PortfolioLedger
 from tigerquant.risk.approvals import ApprovalRegistry, OrderIntentView
 from tigerquant.risk.gateway import RiskGateway, RiskRequest
+from tigerquant.risk.metrics import RiskMetrics
 from tigerquant.risk.policy import RiskPolicy
 from tigerquant.risk.state import Actor, RiskState
 
@@ -60,6 +61,10 @@ def make_request(order: OrderIntentView, **overrides: object) -> RiskRequest:
         "session": TradingSession(),
         "submission_target": SubmissionTarget.SIMULATION,
         "mode": Mode.BACKTEST,
+        # The session limits fail closed without metrics, so every request carries them.
+        # The opening equity matches the ledger fixture, so the loss, drawdown and turnover
+        # fractions are measured against a realistic base rather than an arbitrary one.
+        "metrics": RiskMetrics.baseline(equity=Decimal(100000)),
     }
     base.update(overrides)
     return RiskRequest(**base)  # type: ignore[arg-type]

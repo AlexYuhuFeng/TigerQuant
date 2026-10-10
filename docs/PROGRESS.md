@@ -1,7 +1,7 @@
 # Durable progress state
 
-Status: CR-00, CR-01 and CR-02 complete. CR-05 substantially delivered and verified.
-Current CR: CR-07 (risk policy set and watchdog) — deliberately before CR-03
+Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-05 substantially delivered and verified.
+Current CR: CR-03 (Tiger paper orders) — now unblocked by CR-07
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -117,6 +117,37 @@ Full evidence: `docs/evidence/cr02_reconciliation.txt`.
 CR-02's gate — "account type verified via API, cash/positions/orders read and reconciled; no
 submit path" — is met. Nothing has been submitted, modified or cancelled.
 
+### 2026-10-10 — CR-07 complete: session risk limits, watchdog, privilege bypass
+
+Full evidence: `docs/evidence/cr07_risk_controls.txt`.
+
+CR-01's gateway judged one order in isolation. Session limits cannot: a daily loss limit, a
+drawdown limit, a turnover budget and an order-rate cap are statements about **accumulated**
+activity, so CR-07 adds the accumulator and the limits that read it.
+
+- `risk/metrics.py` — `RiskMetrics` accumulates equity, peak equity, realised and unrealised P&L,
+  notional traded and submissions. Deterministic and fed from journaled events, so a halt can be
+  reproduced and explained. Peak equity is monotonic; turnover counts **notional, not orders**,
+  because ten small orders and one large order carry very different risk; the trading day is
+  *injected*, because it is an exchange-calendar fact and not a wall-clock one.
+- Four new limits: `max_turnover_fraction` (2.0), `max_daily_loss_fraction` (0.02, one-sided — a
+  gain is not a negative loss), `max_drawdown_fraction` (0.05, from the session peak), and
+  `max_orders_per_hour` (30, a rolling window that complements the per-cycle cap).
+- **All four fail closed when metrics are absent.** A loss limit that cannot be evaluated is not a
+  limit that may be assumed satisfied. That forced every existing call site to supply metrics,
+  which is the correct consequence rather than an inconvenience.
+- `ops/watchdog.py` — an independent supervisor whose only power is to **stop**. It cannot trade,
+  cannot approve, and cannot clear a halt (owner only). It reads metrics and conditions, never
+  prose, so a model arguing for one more trade changes nothing.
+- The privilege-bypass suite is the part that matters: a denied outcome cannot be upgraded to an
+  approval; a forged token is refused; an approval cannot be replayed; the AI actor can neither
+  halt nor clear; the watchdog cannot clear its own halt; the policy cannot be mutated at runtime;
+  a check that raises denies rather than allows; and a source-tree scan asserts the broker write
+  APIs appear nowhere outside the single adapter.
+
+**Why CR-07 had to precede CR-03:** submitting orders under a policy that bounds only a single
+order at a time would mean having operated without session limits, and the evidence would show it.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
@@ -141,10 +172,10 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Known limitations (honest list)
 
-- **CR-03 is not started, and deliberately so.** No order has been placed, modified or cancelled.
-  The current credential holds read-only scopes and could not place one. Submitting orders before
-  CR-07's turnover, day-loss, drawdown and order-rate limits exist would be the wrong order of
-  work, so **CR-07 comes next**.
+- **CR-03 is not started.** No order has been placed, modified or cancelled. The current
+  credential holds read-only scopes and could not place one. A write-scoped grant is a separate,
+  deliberate owner decision with its own ADR; the guarded write adapter can be built and tested
+  against the deterministic fake broker meanwhile.
 - CR-04 and CR-06 are not started. `nautilus_trader==1.231.0` and `litellm==1.104.2` are pinned and
   lock-resolved but not installed or exercised.
 - The engine and LLM extras are not in the running environment; only `dev`, `db` and the minimal
@@ -176,9 +207,10 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Next actions
 
-1. **CR-07 — the full risk policy set and the watchdog.** Turnover, day-loss, drawdown and
-   order-rate limits, the kill switch, and the privilege-bypass tests. This is the gate that must
-   be in place before CR-03 can submit anything.
+1. **CR-03 — Tiger PAPER order integration and the order state machine.** The state machine,
+  reconciliation and quarantine paths already exist and are tested against the deterministic fake
+  broker; what CR-03 adds is the guarded Tiger write adapter behind the single write call site.
+  CR-07's session limits are now in place, so this is no longer premature.
 2. Wire the projection repository into the replay and paper pipelines so the database is actually
-   fed, and add the journal-versus-database drift check (CR-09 detector).
+  fed, and add the journal-versus-database drift check (CR-09 detector).
 3. CR-04 (NautilusTrader adapter) and CR-06 (model service) remain buildable offline.

@@ -38,6 +38,7 @@ from tigerquant.risk.state import RiskState
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from tigerquant.risk.metrics import RiskMetrics
     from tigerquant.risk.policy import PortfolioView, RiskPolicy, TradingSessionView
 
 __all__ = ["RiskGateway", "RiskOutcome", "RiskRequest"]
@@ -62,6 +63,10 @@ class RiskRequest:
     #: forgets to declare a target gets a denial rather than a submission.
     submission_target: SubmissionTarget = SubmissionTarget.NONE
     mode: Mode = Mode.BACKTEST
+    #: Accumulated session risk quantities (CR-07). ``None`` means the caller supplied none,
+    #: and the session limits then fail closed: a loss limit that cannot be evaluated is not
+    #: a limit that may be assumed satisfied.
+    metrics: RiskMetrics | None = None
 
     def mark_for(self, instrument: str) -> Decimal | None:
         mark = self.marks.get(instrument)
@@ -271,6 +276,12 @@ class RiskGateway:
             ("gross_exposure", _check_gross_exposure),
             ("order_rate", _check_order_rate),
             ("no_blocking_intents", _check_no_blocking_intents),
+            # Session limits (CR-07). Appended rather than reordered, so the recorded check
+            # sequence stays stable across policy versions.
+            ("daily_loss", _check_daily_loss),
+            ("drawdown", _check_drawdown),
+            ("turnover", _check_turnover),
+            ("order_rate_rolling", _check_rolling_order_rate),
         )
 
 
@@ -492,5 +503,92 @@ def _check_no_blocking_intents(ctx: _Context) -> _CheckResult:
             f"{ctx.request.blocking_intents} order intent(s) are unresolved "
             "(unknown outcome, quarantined, partially filled or cancelling); "
             "new exposure is blocked until reconciliation completes",
+        )
+    return None
+
+
+def _check_daily_loss(ctx: _Context) -> _CheckResult:
+    """Refuse new exposure once the session has lost too much of its opening equity.
+
+    Deliberately one-sided: a session that is *up* is not a session with a negative loss, so
+    the comparison is ``loss > limit`` and never ``abs(pnl) > limit``.
+    """
+    metrics = ctx.request.metrics
+    if metrics is None:
+        return (
+            ReasonCode.RISK_HALTED,
+            "no session metrics are available, so the daily loss limit cannot be evaluated; "
+            "refusing to open exposure rather than assuming the limit is satisfied",
+        )
+    loss = metrics.daily_loss_fraction()
+    if loss > ctx.policy.max_daily_loss_fraction:
+        return (
+            ReasonCode.DAILY_LOSS_EXCEEDED,
+            f"session loss is {loss:.6f} of opening equity; limit is "
+            f"{ctx.policy.max_daily_loss_fraction}",
+        )
+    return None
+
+
+def _check_drawdown(ctx: _Context) -> _CheckResult:
+    """Refuse new exposure once equity is far enough below its session peak.
+
+    Measured from the peak, so a partial recovery does not reset the limit.
+    """
+    metrics = ctx.request.metrics
+    if metrics is None:
+        return (
+            ReasonCode.RISK_HALTED,
+            "no session metrics are available, so the drawdown limit cannot be evaluated",
+        )
+    drawdown = metrics.drawdown_fraction()
+    if drawdown > ctx.policy.max_drawdown_fraction:
+        return (
+            ReasonCode.DRAWDOWN_EXCEEDED,
+            f"drawdown is {drawdown:.6f} from the session peak; limit is "
+            f"{ctx.policy.max_drawdown_fraction}",
+        )
+    return None
+
+
+def _check_turnover(ctx: _Context) -> _CheckResult:
+    """Refuse once the session has traded too much notional.
+
+    Turnover counts *notional*, not order count: ten small orders and one large order carry
+    very different risk, and an order-count limit would let a strategy churn.
+    """
+    metrics = ctx.request.metrics
+    if metrics is None:
+        return (
+            ReasonCode.RISK_HALTED,
+            "no session metrics are available, so the turnover limit cannot be evaluated",
+        )
+    turnover = metrics.turnover_fraction()
+    if turnover > ctx.policy.max_turnover_fraction:
+        return (
+            ReasonCode.TURNOVER_EXCEEDED,
+            f"session turnover is {turnover:.6f} of opening equity; limit is "
+            f"{ctx.policy.max_turnover_fraction}",
+        )
+    return None
+
+
+def _check_rolling_order_rate(ctx: _Context) -> _CheckResult:
+    """Bound submissions per rolling hour, complementing the per-cycle cap.
+
+    ``max_orders_per_cycle`` bounds one pipeline cycle; without a rolling bound, a strategy
+    that cycles quickly can still submit without limit.
+    """
+    metrics = ctx.request.metrics
+    if metrics is None:
+        return (
+            ReasonCode.RISK_HALTED,
+            "no session metrics are available, so the rolling order-rate limit cannot be evaluated",
+        )
+    recent = metrics.orders_last_hour(now=ctx.request.as_of)
+    if recent > ctx.policy.max_orders_per_hour:
+        return (
+            ReasonCode.ORDER_RATE_EXCEEDED,
+            f"{recent} submissions in the last hour; limit is {ctx.policy.max_orders_per_hour}",
         )
     return None

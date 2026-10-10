@@ -67,6 +67,7 @@ from tigerquant.portfolio.ledger import PortfolioLedger
 from tigerquant.portfolio.sizing import order_quantity, shares_for_weight
 from tigerquant.risk.approvals import ApprovalRegistry, OrderIntentView
 from tigerquant.risk.gateway import RiskGateway, RiskRequest
+from tigerquant.risk.metrics import RiskMetrics
 from tigerquant.risk.policy import RiskPolicy
 from tigerquant.risk.state import Actor, RiskState
 from tigerquant.strategy.reference import REFERENCE_MODEL_ID, MomentumReferenceStrategy
@@ -180,6 +181,10 @@ class ReplayEngine:
         self._staleness = StalenessPolicy.uniform(fixture.max_fact_age_seconds)
         self._builder = SnapshotBuilder(self._store, staleness=self._staleness)
         self._ledger = PortfolioLedger(initial_cash=fixture.initial_cash)
+        # Session metrics the loss, drawdown, turnover and order-rate limits are
+        # measured against. A single-session replay needs an opening equity but
+        # not a trading day; a multi-day paper worker supplies the day instead.
+        self._metrics = RiskMetrics.baseline(equity=fixture.initial_cash)
         self._projection = OrderProjection()
         self._gate = StartupGate()
         self._registry = ApprovalRegistry()
@@ -521,6 +526,7 @@ class ReplayEngine:
             snapshot_usable=snapshot.is_usable,
             session=self._session,
             blocking_intents=len(self._projection.blocking_intents()),
+            metrics=self._metrics,
             submission_target=self._submission_target,
             mode=self._mode,
         )
@@ -565,6 +571,12 @@ class ReplayEngine:
             return
         self._counters.submitted += 1
         self._orders_this_cycle += 1
+        # Count the submission toward turnover and the rolling order rate. This happens
+        # only after the broker acknowledged enough to be a real submission attempt.
+        self._metrics.record_order_submitted(
+            at=self._clock.now(),
+            notional=self._marks.get(order_view.instrument, ZERO) * order_view.quantity,
+        )
         if result.state is not None and result.state is BrokerOrderState.FILLED:
             self._counters.filled += 1
         elif result.state is BrokerOrderState.REJECTED:
@@ -598,6 +610,31 @@ class ReplayEngine:
             net_exposure=net,
             ledger_digest=self._ledger.digest(),
         )
+        # Feed the session metrics the loss and drawdown limits are measured against. Doing
+        # it here, from the same valuation the ledger was marked with, keeps the two in
+        # step: a limit evaluated against a different number than the one journaled would
+        # be impossible to reproduce.
+        try:
+            self._metrics.record_valuation(
+                equity=equity,
+                gross_exposure=gross,
+                realized_pnl=sum(
+                    (position.realized_pnl for position in self._ledger.positions()), ZERO
+                ),
+                unrealized_pnl=sum(
+                    (
+                        position.unrealized_pnl(
+                            self._marks.get(position.instrument, position.average_cost)
+                        )
+                        for position in self._ledger.positions()
+                    ),
+                    ZERO,
+                ),
+            )
+        except TigerQuantError:
+            # A valuation that cannot be computed leaves the metrics at their last good
+            # value, and the gateway's fail-closed metrics check handles the rest.
+            return
 
     # -- helpers -----------------------------------------------------------------
 

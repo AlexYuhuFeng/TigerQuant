@@ -1,0 +1,103 @@
+TigerQuant CR-07 verification evidence - session risk limits, watchdog, privilege bypass
+Generated: see the git commit this file was added in
+
+Gate: "Risk tests and privilege-bypass tests; kill switch; no alternative order path"
+
+===========================================================================
+1. What CR-07 added
+===========================================================================
+CR-01's gateway judged a single order in isolation: is this symbol allowed, is this
+notional within the per-order cap, is the mark fresh. Session limits cannot work that way,
+because a daily loss limit, a drawdown limit, a turnover budget and an order-rate cap are
+statements about ACCUMULATED activity. CR-07 adds the accumulator and the limits that read
+it, plus an independent supervisor.
+
+risk/metrics.py - RiskMetrics
+  Accumulates the running quantities. Deterministic and fed from journaled events, so
+  rebuilding it from a journal reproduces exactly the state the live process had; a halt
+  decision can therefore be reproduced and explained. Deliberate properties:
+    * peak equity is monotonic, so a losing streak is not erased by a partial recovery;
+    * turnover counts NOTIONAL, not order count - ten small orders and one large order
+      carry very different risk, and an order-count limit would let a strategy churn;
+    * the trading day is INJECTED, never read from a clock, because the trading day is an
+      exchange-calendar fact rather than a wall-clock one;
+    * everything is Decimal. A limit evaluated in binary floating point can be wrong in the
+      last cent, and a limit that is wrong in the last cent can be exceeded by that much.
+
+risk/policy.py - four new limits
+  max_turnover_fraction      2.0    cumulative traded notional / opening equity
+  max_daily_loss_fraction    0.02   one-sided: a gain is not a negative loss
+  max_drawdown_fraction      0.05   measured from the session peak
+  max_orders_per_hour        30     rolling window, complements max_orders_per_cycle
+
+risk/gateway.py - four new checks, appended after the CR-01 set
+  daily_loss, drawdown, turnover, order_rate_rolling
+
+  All four FAIL CLOSED when metrics are absent. A loss limit that cannot be evaluated is
+  not a limit that may be assumed to be satisfied. This is deliberately inconvenient: it
+  forced every existing call site to supply metrics, which is the correct consequence.
+
+ops/watchdog.py - Watchdog
+  A separate, deterministic evaluator whose only power is to STOP. It cannot trade, cannot
+  approve, and cannot clear a halt. Conditions: daily loss, drawdown, turnover, unresolved
+  order intents, un-reconciled account, unreachable broker, clock skew beyond tolerance.
+  It reads metrics and conditions, never prose, so a provider outage or a persuasive model
+  changes nothing here (acceptance gate 11).
+
+===========================================================================
+2. Privilege-bypass tests (the part that matters)
+===========================================================================
+The CR-07 gate asks for bypass tests, not merely functional tests. These attempt to get an
+order out without going through every control:
+
+  [x] a denied outcome cannot be upgraded to an approval
+      -> RiskGateway.issue raises RiskDenied for a DENY outcome
+  [x] a forged approval token is refused
+      -> ApprovalRegistry.consume raises for a token it never issued
+  [x] an approval cannot be replayed
+      -> consume is single-use; a second attempt raises "already consumed"
+  [x] the AI actor cannot halt OR clear risk state
+      -> RiskState.halt/clear raise PermissionError for Actor.AGENT
+  [x] the watchdog cannot clear its own halt
+      -> only Actor.OWNER may clear; a supervisor that can un-halt itself is not a control
+  [x] the policy cannot be mutated at runtime
+      -> RiskPolicy is frozen; a limit change is a new versioned object with a new hash
+  [x] the gateway denies when its own state is halted
+      -> RISK_HALTED is returned regardless of how healthy the order looks
+  [x] a check that raises DENIES rather than allows
+      -> CHECK_ERROR, not an exception escaping into the pipeline
+  [x] only one module may call a broker write API
+      -> a source-tree scan asserts place_order/modify_order/cancel_order/submit_order
+         appear nowhere outside adapters/tiger/execution.py
+  [x] a halt's timestamp comes from the injected clock
+      -> a halt cannot be time-travelled around
+
+A halt must not strand orders: RiskState.blocks_new_exposure() gates NEW exposure only, and
+the cancel path does not consult it. Risk controls staying alive while the model is stopped
+is the point of an independent supervisor.
+
+===========================================================================
+3. Test results
+===========================================================================
+$ python -m pytest tests -q
+424 passed
+
+$ python -m pytest tests/unit/test_risk_limits_watchdog.py -q
+38 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 75 source files
+
+===========================================================================
+4. Why CR-07 had to precede CR-03
+===========================================================================
+CR-03 submits orders. Without turnover, daily-loss, drawdown and rolling order-rate limits
+in place, the first paper orders would have been submitted under a policy that bounds only
+a single order at a time. The order of work matters more than the order of the work queue
+table: submitting first and adding session limits afterwards would mean having operated
+without them, and the evidence would show it.
+
+Nothing has been submitted, modified or cancelled at any point.

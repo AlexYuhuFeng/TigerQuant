@@ -27,11 +27,11 @@ Last updated: 2026-10-10.
 | CR-00 | **COMPLETE** | `docs/adr/` (13 ADRs), `docs/THREAT_MODEL.md`, `docs/COMPONENT_MAP.md`, `docs/DEPENDENCIES.md`, `pyproject.toml` + `uv.lock`, `docs/integrations/*`, `docs/evidence/cr00_pypi_probe.json` | Vendor APIs verified against pinned tags, not "latest" docs |
 | CR-01 | **COMPLETE** | `docs/evidence/cr01_verification.txt`, `docs/evidence/replays/`, `docs/CR-01-VERTICAL-SLICE.md` | Fully offline; `SIMULATED` |
 | CR-02 | **COMPLETE** | `docs/evidence/cr02_authorization.txt`, `docs/evidence/cr02_reconciliation.txt` | Gate met: account type verified via the API, cash/positions/orders read and reconciled, and no submit path exists. `PAPER_VERIFIED`. |
-| CR-03 | **NOT STARTED — and should not start yet** | — | No order has been placed, modified or cancelled. The current credential holds read-only scopes and could not place one. **CR-07 must land first:** submitting orders without turnover, day-loss, drawdown and order-rate limits in place would be the wrong order of work. |
+| CR-03 | **NOT STARTED — CR-07 now unblocks it** | — | No order has been placed, modified or cancelled. The current credential holds read-only scopes and could not place one. A write-scoped grant is a separate, deliberate owner decision with its own ADR; CR-03 can be built and tested against the fake broker meanwhile. |
 | CR-04 | READY | — | Buildable offline; `nautilus_trader==1.231.0` cp314 wheel confirmed, not yet installed |
 | CR-05 | **SUBSTANTIALLY DELIVERED** | `docs/evidence/cr05_database.txt`, `docs/adr/ADR-0013-database-architecture.md` | Calendar, source registry, per-category staleness, untrusted-text sandboxing, durable fact log, vintage-correct revisions, derivation lineage, and the containerised PostgreSQL layer are implemented and tested. Not marked complete: news/filing ingestion connectors do not exist yet. |
 | CR-06 | READY | interfaces frozen in CR-01 (`decision/provider.py`) | Offline provider + benchmark harness buildable without a live key |
-| CR-07 | READY | baseline gate in CR-01 (`risk/`) | Full policy set, watchdog, kill switch. **Should precede CR-03.** |
+| CR-07 | **COMPLETE** | `docs/evidence/cr07_risk_controls.txt` | Session limits (turnover, daily loss, drawdown, rolling order rate), the risk-metrics accumulator, and an independent watchdog whose only power is to stop. Includes the privilege-bypass suite and the "no alternative order path" source scan. |
 | CR-08 | PENDING | — | Depends on CR-05/CR-07 state to display |
 | CR-09 | PENDING | fault harness laid in CR-01 | Needs CR-02/CR-03 for real paper evidence |
 | CR-10 | PENDING | — | Documentation only; never activates anything |
@@ -40,10 +40,10 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **386 passed** |
-| `pytest -q -m "not requires_db"` | **366 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **424 passed** |
+| `pytest -q -m "not requires_db"` | **404 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
-| `mypy` (strict) | Success, 72 source files |
+| `mypy` (strict) | Success, 75 source files |
 | `ruff check` / `format --check` | Clean |
 | `tools/tiger_reconcile.py` | `RECONCILED=true` against the live Tiger paper account |
 

@@ -71,6 +71,20 @@ class RiskPolicy(BaseModel):
     max_symbol_fraction: Annotated[Decimal, Field(ge=0, le=1)]
     max_order_fraction: Annotated[Decimal, Field(ge=0, le=1)]
 
+    # -- session limits (CR-07) --------------------------------------------------
+    #: Cumulative traded notional per session, as a fraction of opening equity. Bounds how
+    #: much a strategy can churn even while every individual order is within its own cap.
+    max_turnover_fraction: Annotated[Decimal, Field(ge=0)] = Decimal("2.0")
+    #: Stop opening new exposure once the session has lost this fraction of its opening
+    #: equity. One-sided: a gain is not a negative loss.
+    max_daily_loss_fraction: Annotated[Decimal, Field(ge=0, le=1)] = Decimal("0.02")
+    #: Stop once equity has fallen this fraction below its session peak. Measured from the
+    #: peak, so a losing streak cannot be magically reset by a partial recovery.
+    max_drawdown_fraction: Annotated[Decimal, Field(ge=0, le=1)] = Decimal("0.05")
+    #: Submissions permitted in any rolling hour. Complements ``max_orders_per_cycle``,
+    #: which only bounds a single pipeline cycle.
+    max_orders_per_hour: Annotated[int, Field(ge=0)] = 30
+
     #: A mark older than this invalidates the decision that would use it.
     max_mark_age_seconds: Annotated[int, Field(ge=1)]
     #: A quoted price must be strictly positive; zero/negative is a data fault.
@@ -88,3 +102,12 @@ class RiskPolicy(BaseModel):
 
     def is_allowed(self, instrument: str) -> bool:
         return instrument in self.allowed_instruments
+
+    def session_limits(self) -> tuple[Decimal, Decimal, Decimal, int]:
+        """The four session limits, in a stable order for reporting."""
+        return (
+            self.max_turnover_fraction,
+            self.max_daily_loss_fraction,
+            self.max_drawdown_fraction,
+            self.max_orders_per_hour,
+        )

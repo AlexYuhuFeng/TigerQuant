@@ -33,6 +33,7 @@ from tigerquant.market.session import TradingSession
 from tigerquant.portfolio.ledger import PortfolioLedger
 from tigerquant.risk.approvals import ApprovalRegistry, OrderIntentView
 from tigerquant.risk.gateway import RiskGateway, RiskRequest
+from tigerquant.risk.metrics import RiskMetrics
 from tigerquant.risk.policy import RiskPolicy
 from tigerquant.risk.state import RiskState
 
@@ -98,6 +99,7 @@ class Harness:
             session=TradingSession(),
             submission_target=SubmissionTarget.SIMULATION,
             mode=Mode.BACKTEST,
+            metrics=RiskMetrics.baseline(equity=self.ledger.cash),
         )
         outcome = self.gateway.evaluate(request, portfolio=self.ledger)
         assert outcome.allowed, outcome.detail
