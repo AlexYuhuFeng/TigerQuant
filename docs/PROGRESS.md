@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: hardening complete; CR-03 awaits the owner's write-scope decision
+Current CR: code-side CR-03 unblocking complete; awaiting the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -506,6 +506,32 @@ and neither contributes to a journaled event.
 Ruff then caught the fix itself (B023, late binding): my resolver captured the loop variable
 `aliases`, so it would have resolved every file against the *last* file's aliases and the check
 would have passed by alphabetical accident.
+
+### 2026-10-10 — The write-scope ceiling becomes an explicit opt-in
+
+Full evidence: `docs/evidence/scope_ceiling.txt`. This makes CR-03's authorization *possible*; it
+does not grant it and places no order.
+
+**The project's own guard blocked the grant.** The CR-02 session refused any token carrying a
+write scope — correctly, as defence against a server that ignores the requested set — which meant
+the moment the operator approved `api.trade:write`, every TigerQuant session would refuse to load
+the token. The control worked exactly as designed and made CR-03 impossible.
+
+**The rule changed, and the new one is stronger.** Old: *"never hold a write scope."* New:
+**"never hold a scope we did not request."** The check is a set difference against the requested
+set, not a blocklist, so with the default (four read scopes) the effect is identical to before —
+and with the opt-in, anything *other* than the write scope that appears is still refused. A
+blocklist refuses the scopes someone thought to list; a set difference refuses every scope that
+was not asked for, including ones nobody has invented yet.
+
+**The opt-in is a constructor parameter defaulting to False**, so every other module stays
+read-only without having to say so. Only `tools/tiger_login.py --enable-order-submission` sets it,
+and that flag prints what it implies — including that the token is *not* paper-bound — **before**
+the authorization URL, so the warning is on screen while the consent page is read.
+
+One test was wrong on the first run and is worth recording: it asserted that a read-only session
+refuses an *exact-match* grant of the read scopes, which is not what "refuse anything not
+requested" means. The assertion was right to fail; corrected rather than papered over.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

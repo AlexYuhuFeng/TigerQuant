@@ -40,7 +40,7 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **715 passed** |
+| `pytest -q` (PostgreSQL running) | **731 passed** |
 | `pytest -q -m "not requires_db"` | **640 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
 | `mypy` (strict) | Success, 92 source files |
@@ -55,6 +55,8 @@ Last updated: 2026-10-10.
 ## External blockers (do not paper over these)
 
 1. **CR-03 needs a write-scoped OAuth grant (`api.trade:write`), which is an owner decision.**
+   Everything code-side is ready: the guard is hardened and tested, and the grant is one
+   command. The remaining step is the owner approving the consent page in a browser.
    The project's grant deliberately carries four read scopes only. Every part of CR-03 that can
    be built without it has been built and tested against a fake SDK; the one remaining
    acceptance item is a real paper round trip, and it cannot be faked or worked around.

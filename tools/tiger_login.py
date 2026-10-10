@@ -35,6 +35,8 @@ if str(REPO_ROOT / "src") not in sys.path:
 
 from tigerquant.adapters.tiger.guard import TigerAccountGuard, mask_account  # noqa: E402
 from tigerquant.adapters.tiger.oauth import (  # noqa: E402
+    READ_ONLY_SCOPES,
+    WRITE_SCOPE,
     TigerEnvironment,
     TigerQuantOAuthSession,
     build_oauth2_config,
@@ -143,6 +145,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="ask the operating system to open the authorization URL",
     )
+    parser.add_argument(
+        "--enable-order-submission",
+        action="store_true",
+        help=(
+            "request api.trade:write in addition to the read scopes. This is the ONLY way to "
+            "obtain a credential that can place an order, and it is deliberately not the "
+            "default. Read docs/LIVE_READINESS.md and docs/evidence/guard_write_scope.txt "
+            "first: write scope is NOT paper-bound."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # A real Tiger paper account lives on the ordinary gateway; the paper/live decision is
@@ -155,7 +167,14 @@ def main(argv: list[str] | None = None) -> int:
     _emit("TOKEN_HOME=", str(home))
 
     try:
-        session = TigerQuantOAuthSession(authorize_timeout_seconds=args.timeout)
+        requested_scopes = READ_ONLY_SCOPES
+        if args.enable_order_submission:
+            requested_scopes = f"{READ_ONLY_SCOPES} {WRITE_SCOPE}"
+        session = TigerQuantOAuthSession(
+            authorize_timeout_seconds=args.timeout,
+            scopes=requested_scopes,
+            allow_write_scope=args.enable_order_submission,
+        )
     except TigerQuantError as exc:
         _emit("ERROR=", str(exc))
         return 2
@@ -189,6 +208,29 @@ def main(argv: list[str] | None = None) -> int:
             "access (basic, account, quote, trade:read). It never requests trade:write.\n",
             flush=True,
         )
+        if args.enable_order_submission:
+            # Say what is being asked for BEFORE the consent page, not after. The warning is
+            # deliberately verbose: this is the one command in the project that widens the
+            # credential, and the operator should not have to remember what it implies.
+            print(
+                "\n"
+                "  ORDER SUBMISSION BEING REQUESTED\n"
+                "  -------------------------------\n"
+                "  This adds api.trade:write to the grant. Read this before approving:\n"
+                "\n"
+                "   * The token is NOT paper-bound. A single Tiger OAuth grant returns BOTH a\n"
+                "     funded live-capable account (accountType STANDARD) and the paper account.\n"
+                "     There is no separate paper issuer.\n"
+                "   * The account guard is what keeps TigerQuant paper-only: it refuses any\n"
+                "     account that is not explicitly PAPER, re-verifies against the broker before\n"
+                "     every submission, and denies by default on an unrecognised type.\n"
+                "   * Mode.LIVE still refuses to run. Granting this does not enable live trading;\n"
+                "     it enables CR-03's PAPER order round trip.\n"
+                "   * Revoke at any time from the Tiger authorized-apps page, or with --logout.\n"
+                "\n"
+                "  Evidence: docs/evidence/guard_write_scope.txt\n",
+                flush=True,
+            )
         if args.open_browser:
             try:
                 webbrowser.open(url)

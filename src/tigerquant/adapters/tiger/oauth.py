@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 __all__ = [
     "FORBIDDEN_SCOPES",
     "READ_ONLY_SCOPES",
+    "WRITE_SCOPE",
     "TigerEnvironment",
     "TigerQuantOAuthSession",
     "build_oauth2_config",
@@ -58,8 +59,11 @@ __all__ = [
 #: The only scopes this project ever requests: everything needed to read, nothing to write.
 READ_ONLY_SCOPES: str = "api.basic:read api.account:read api.quote:read api.trade:read"
 
-#: Scopes that must never appear in a requested or granted scope set.
-FORBIDDEN_SCOPES: tuple[str, ...] = ("api.trade:write",)
+#: The scope that permits placing an order. Requested only with an explicit operator flag.
+WRITE_SCOPE: str = "api.trade:write"
+
+#: Scopes that are never requested unless order submission has been deliberately enabled.
+FORBIDDEN_SCOPES: tuple[str, ...] = (WRITE_SCOPE,)
 
 #: Dynamic-registration surface name. Each surface registers its own client so it appears
 #: separately on the owner's authorization page and can be revoked on its own.
@@ -154,7 +158,7 @@ class TigerQuantOAuthSession:
     made in one visible place instead of being spread across overrides.
     """
 
-    __slots__ = ("_client_name", "_home", "_manager", "_scopes")
+    __slots__ = ("_allow_write_scope", "_client_name", "_home", "_manager", "_scopes")
 
     def __init__(
         self,
@@ -165,9 +169,29 @@ class TigerQuantOAuthSession:
         scopes: str = READ_ONLY_SCOPES,
         client_name: str = CLIENT_NAME,
         authorize_timeout_seconds: int = 900,
+        allow_write_scope: bool = False,
     ) -> None:
         manager_type = load_session_manager_type()
         self._scopes = _normalise_scopes(scopes)
+        #: Whether this session was deliberately built to hold api.trade:write.
+        #:
+        #: Default False, and the default is the control: every other module in the project
+        #: constructs a session without this argument, so a write scope in a granted token is
+        #: a refusal rather than a surprise. Only the login tool, with an explicit operator
+        #: flag, sets it.
+        self._allow_write_scope = allow_write_scope
+        if allow_write_scope:
+            # Refuse the incoherent combination rather than discovering it at the first order:
+            # a session that permits a write scope but never ASKS for one would produce a token
+            # that cannot trade, which looks like a broker problem instead of a configuration
+            # mistake.
+            missing = [scope for scope in FORBIDDEN_SCOPES if scope not in self._scopes.split()]
+            if missing:
+                msg = (
+                    f"allow_write_scope=True but the requested scope set does not include "
+                    f"{missing}. Ask for it explicitly or leave the flag off."
+                )
+                raise ConfigurationError(msg)
         self._client_name = client_name
         self._home = home or default_token_home()
         self._home.mkdir(parents=True, exist_ok=True)
@@ -255,22 +279,49 @@ class TigerQuantOAuthSession:
     def logout(self) -> None:
         self._manager.logout()
 
-    @staticmethod
-    def _assert_no_write_scope(granted: str) -> None:
-        """Refuse a token that carries a write scope, even if we did not ask for one.
+    def _assert_no_write_scope(self, granted: str) -> None:
+        """Refuse any scope the session did not explicitly ask for.
 
-        Defence against a server that ignores the requested scope set: if consent came back
-        wider than requested, the credential is not one this project is willing to hold.
+        The rule is not "never hold a write scope" -- that would make CR-03 impossible to
+        authorize. It is **"never hold a scope we did not request"**, which is strictly stronger
+        and is what defends against a server that ignores the requested set: if consent came
+        back wider than asked, the credential is not one this project is willing to hold.
+
+        So the check is a set difference against what we asked for, not a blocklist. With the
+        default (no write scope requested) the practical effect is identical to before: a write
+        scope in the granted set is refused. With ``allow_write_scope=True`` the write scope is
+        requested, so it is permitted -- and anything ELSE that appears is still refused.
         """
         granted_set = set(granted.split())
-        offending = sorted(granted_set.intersection(FORBIDDEN_SCOPES))
-        if offending:
+        requested = set(self._scopes.split())
+        unexpected = sorted(granted_set - requested)
+        if unexpected:
             msg = (
-                f"the authorization server granted {offending}, which this project never "
-                "requests; refusing to use a credential that can place orders. Revoke the "
-                "grant and re-authorize."
+                f"the authorization server granted {unexpected}, which this session did not "
+                f"request (it asked for {sorted(requested)}). Refusing a credential wider than "
+                "the one intended; revoke the grant and re-authorize."
             )
             raise ConfigurationError(msg)
+        if not self._allow_write_scope:
+            offending = sorted(granted_set.intersection(FORBIDDEN_SCOPES))
+            if offending:
+                # Unreachable when the requested set is read-only, because such a grant would
+                # already have failed the check above. Kept as a second lock on the same door.
+                msg = (
+                    f"the granted scope includes {offending} and this session was not built to "
+                    "hold it. Revoke the grant and re-authorize, or ask for it deliberately "
+                    "with --enable-order-submission."
+                )
+                raise ConfigurationError(msg)
+
+    @property
+    def permits_order_submission(self) -> bool:
+        """Whether this session was deliberately authorized to place orders.
+
+        A property rather than a raw scope check, so callers ask a question about intent rather
+        than about a string, and so the one place that knows the answer is this class.
+        """
+        return self._allow_write_scope and WRITE_SCOPE in self._scopes.split()
 
     def describe(self) -> dict[str, str]:
         """Non-secret description of the session, safe to print or journal."""

@@ -1,0 +1,145 @@
+TigerQuant — the write-scope ceiling, made an explicit opt-in
+Generated: see the git commit this file was added in
+
+This makes CR-03's authorization possible. It does NOT grant it, and nothing here places an
+order.
+
+===========================================================================
+1. The problem: the project's own guard blocked the grant
+===========================================================================
+The CR-02 session asserted, on every token load:
+
+    the authorization server granted ['api.trade:write'], which this project never requests;
+    refusing to use a credential that can place orders. Revoke the grant and re-authorize.
+
+That was right when the ceiling was absolute -- it defends against a server that ignores the
+requested scope set. But it also meant the grant could never be made: the moment the operator
+approved api.trade:write, every TigerQuant session would refuse to load the token. The control
+worked exactly as designed and made CR-03 impossible.
+
+===========================================================================
+2. The rule changed, and the new one is STRONGER
+===========================================================================
+Old rule: "never hold a write scope."
+New rule: **"never hold a scope we did not request."**
+
+The check is a set difference against the requested set, not a blocklist:
+
+    unexpected = granted - requested   -> refuse, naming both sets
+
+With the default (four read scopes requested) the practical effect is identical to before: a
+write scope in the granted set is unexpected and refused. With the opt-in, api.trade:write is
+requested, so it is permitted -- **and anything else that appears is still refused.**
+
+That is strictly stronger than the old check. A blocklist refuses the scopes someone thought to
+list; a set difference refuses every scope that was not asked for, including ones nobody has
+invented yet.
+
+===========================================================================
+3. The opt-in, and why it is a parameter rather than a flag
+===========================================================================
+    TigerQuantOAuthSession(scopes=..., allow_write_scope=True)
+
+Default False, and the default IS the control: every other module constructs a session without
+this argument, so a write scope in a granted token is a refusal rather than a surprise. Only
+`tools/tiger_login.py --enable-order-submission` sets it.
+
+An incoherent combination is refused rather than discovered later: `allow_write_scope=True` with
+a requested set that does not include the write scope raises at construction. Otherwise the
+token could not trade, and that would surface as an apparent broker problem instead of the
+configuration mistake it is.
+
+`permits_order_submission` is a property on the session, so callers ask a question about intent
+rather than testing a string, and the one class that knows the answer is the one that owns it.
+
+===========================================================================
+4. The operator-facing flag
+===========================================================================
+    python tools/tiger_login.py --flow browser --enable-order-submission
+
+Before printing the authorization URL, the tool prints:
+
+    ORDER SUBmission BEING REQUESTED
+      * The token is NOT paper-bound. A single Tiger OAuth grant returns BOTH a funded
+        live-capable account (accountType STANDARD) and the paper account. There is no
+        separate paper issuer.
+      * The account guard is what keeps TigerQuant paper-only: it refuses any account that is
+        not explicitly PAPER, re-verifies against the broker before every submission, and
+        denies by default on an unrecognised type.
+      * Mode.LIVE still refuses to run. Granting this does not enable live trading; it enables
+        CR-03's PAPER order round trip.
+      * Revoke at any time from the Tiger authorized-apps page, or with --logout.
+
+The warning is printed BEFORE the URL so it is on screen while the consent page is being read,
+not scrolled past afterwards.
+
+===========================================================================
+5. Tests
+===========================================================================
+tests/unit/test_scope_ceiling.py, 16 tests, from both directions:
+
+  the default refuses          a granted write scope is refused; the read scopes are accepted;
+                               permits_order_submission is False
+  the opt-in permits           a granted write scope is accepted; permits_order_submission is
+                               True; and it permits NOTHING ELSE
+  unexpected is always refused an unrequested scope is refused WITH the opt-in and WITHOUT it;
+                               the refusal names what was granted and what was asked for
+  the incoherent combination   permitting without requesting raises at construction
+  the tool                     the flag exists, is store_true with no default override, warns
+                               before the consent page, and uses the named constants rather than
+                               a hardcoded scope string that could drift from the guard
+
+The tests exercise the assertion directly rather than constructing an SDK session: the assertion
+is the control, and the SDK is not.
+
+One test was wrong on the first run and is worth recording. It asserted that a read-only session
+refuses an EXACT-MATCH grant of the read scopes -- which is not what "refuse anything not
+requested" means, and the assertion was right to fail. Corrected rather than papered over.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+731 passed
+
+$ python -m pytest tests/unit/test_scope_ceiling.py -q
+16 passed
+
+$ python -m tigerquant doctor
+[PASS] determinism (no uuid4 / wall-clock calls outside core.clock): clean
+[PASS] mode capabilities (no submission in BACKTEST/SHADOW, LIVE gated): clean
+[PASS] no live enablement surface in source: clean
+[PASS] implementation status is labelled: SIMULATED
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 94 source files
+
+===========================================================================
+7. What this authorises
+===========================================================================
+AUTHORISES: nothing. No grant has been made, no order has been submitted, CR-03 stays blocked
+on an owner decision.
+
+MAKES POSSIBLE: `tools/tiger_login.py --enable-order-submission`, which is the only route to a
+credential that can place an order. Everything that then stands between that credential and a
+funded account is in docs/evidence/guard_write_scope.txt.
+
+DOES NOT CHANGE: Mode.LIVE still raises. No risk limit moves. The read-only default is unchanged
+for every other caller.
+
+===========================================================================
+8. Limitations
+===========================================================================
+1. The token is stored per registered client id, so granting write REPLACES the read-only token
+   for that client rather than keeping both. Re-running without the flag does not restore a
+   read-only token; the operator must re-authorize, which is one extra browser round trip and is
+   the honest behaviour -- silently keeping a wider token while reporting read-only scopes would
+   be worse.
+2. The consent page is the operator's only confirmation that write scope was actually granted.
+   The tool prints GRANTED_SCOPE afterwards, and the session asserts the granted set matches the
+   requested set, but neither can verify what Tiger's UI displayed.
+3. Nothing here tests against the real authorization server. The scope logic is exercised
+   against the observed response shape from CR-02, not against a live consent flow.
