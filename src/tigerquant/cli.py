@@ -14,10 +14,12 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tigerquant import IMPLEMENTATION_STATUS, __version__
+from tigerquant.core.clock import SystemClock
 from tigerquant.core.enums import Mode, capabilities_for
 from tigerquant.core.errors import IntegrationUnavailable, TigerQuantError
 from tigerquant.db.postgres import PostgresRepository, connect
@@ -25,6 +27,7 @@ from tigerquant.db.projector import check_drift, project
 from tigerquant.events.journal import AppendOnlyJournal
 from tigerquant.events.registry import event_type_names
 from tigerquant.market.fixtures import load_scenario
+from tigerquant.ops.drift_monitor import DriftMonitor
 from tigerquant.pipeline.replay import run_replay
 
 if TYPE_CHECKING:
@@ -83,6 +86,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="project even though the journal has a sequence gap (not recommended)",
     )
+
+    drift = sub.add_parser(
+        "drift",
+        help="check the journal against the database, once or on a cadence",
+    )
+    drift.add_argument("journal", type=Path, help="audit journal JSONL to compare")
+    drift.add_argument(
+        "--mode",
+        default=Mode.BACKTEST.value,
+        choices=[mode.value for mode in Mode],
+        help="mode whose database to compare against",
+    )
+    drift.add_argument("--dsn", default=None, help="database to compare; defaults per mode")
+    drift.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=0,
+        help="0 runs a single check; a positive value runs that cadence until interrupted",
+    )
+    drift.add_argument(
+        "--iterations",
+        type=int,
+        default=1,
+        help="how many checks to run when --interval-seconds is positive",
+    )
+    drift.add_argument("--report", type=Path, default=None, help="write the JSON report here")
     return parser
 
 
@@ -113,6 +142,58 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         return 1
     print(f"OK: {verification.records} record(s), head {verification.digest}")
     return 0
+
+
+def _cmd_drift(args: argparse.Namespace) -> int:
+    """Compare the journal with the database and report.
+
+    Exit codes: 0 consistent, 1 drifted, 2 the database could not be reached. A drift is
+    reported and never repaired — we do not know which record is wrong, so overwriting either
+    would destroy the evidence needed to find out (ADR-0004 s5).
+    """
+    mode = Mode(args.mode)
+    dsn = args.dsn or os.environ.get("TIGERQUANT_DB_DSN") or _dev_dsn(mode)
+    try:
+        connection = connect(dsn)
+    except IntegrationUnavailable as exc:
+        print(f"database unavailable: {exc}", file=sys.stderr)
+        return 2
+    except TigerQuantError as exc:
+        print(f"cannot reach the database: {exc}", file=sys.stderr)
+        return 2
+
+    journal_file = Path(args.journal)
+    with connection:
+        repository = PostgresRepository(connection, mode=mode)
+        clock = SystemClock()
+        # No emitter: a drift inspection reads. Emitting an alert into the journal here
+        # would append an event the database does not yet have, and the NEXT check would
+        # then report drift caused by the monitor itself -- a false positive.
+        monitor = DriftMonitor(repository=repository)
+        results = []
+        iterations = max(args.iterations, 1) if args.interval_seconds > 0 else 1
+        for index in range(iterations):
+            with AppendOnlyJournal(journal_file, mode, fsync=False) as journal:
+                events = tuple(record.event for record in journal.iter_records())
+            results.append(monitor.check(events, at=clock.now()))
+            if index < iterations - 1:
+                print(f"check {index + 1}: {results[-1].describe()}")
+                time.sleep(args.interval_seconds)
+
+    for result in results:
+        print(result.describe())
+
+    payload = {
+        "mode": mode.value,
+        "checks": [result.as_record() for result in results],
+        "alert_rate": monitor.alert_rate(),
+        "blocks_new_exposure": any(r.blocks_new_exposure for r in results),
+    }
+    if args.report is not None:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    return 0 if results[-1].consistent else 1
 
 
 def _dev_dsn(mode: Mode) -> str:
@@ -329,6 +410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     handlers = {
         "replay": _cmd_replay,
         "project": _cmd_project,
+        "drift": _cmd_drift,
         "verify-journal": _cmd_verify,
         "doctor": _cmd_doctor,
     }

@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-04 strategy-loop parity, CR-09 scheduling, CR-08 dashboard
+Current CR: CR-08 dashboard, CR-09 long-duration runs and runbooks, CR-10 readiness doc
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -312,6 +312,36 @@ override points, and a docstring names the APIs it forbids. A control that force
 certain words is a control nobody keeps, so the scan now uses the **AST** and looks for call
 nodes. Verified afterwards that it still catches a real violation.
 
+### 2026-10-10 — CR-09 part 2: drift monitoring with measured alerting
+
+Full evidence: `docs/evidence/cr09_drift_monitoring.txt`.
+
+Part 1 built the drift *check*: compare the journal against the database and report. Reporting
+once, on demand, is not monitoring. The design constraint is in the gate's own wording —
+**"measured false alerts"** — so the monitor alerts on **transitions** rather than on state:
+
+* first drift → `WARNING`;
+* still drifting → silence, unless the reminder cadence is due;
+* drifted for `escalate_after` consecutive checks → `CRITICAL` **once**, because a drift that
+  does not clear by itself is a different situation from one that comes and goes;
+* drift clears → an `INFO` recovery alert, so the operator need not re-check to find out.
+
+Twenty checks of one unresolved drift produce exactly **two** alerts — announcement and
+escalation — giving `alerts_per_drifted_check = 0.10`. A second test lowers the cadence to 1s
+and asserts the rate rises *above* 0.5, so the shouting failure mode is visible in the
+measurement too. Both directions are covered because both are failures.
+
+**Live, and not staged:** the monitor found genuine drift — the integration suite truncates the
+same `tq_backtest` database it runs against — reported it, and exited 1. Projecting the journal
+made the next check report consistent and exit 0.
+
+**What it deliberately does not do.** It never *repairs* drift (a divergence means we do not
+know which record is wrong, so overwriting either destroys the evidence). It never *halts* — it
+reports `blocks_new_exposure` as a fact and the watchdog decides. And it emits nothing when
+given no emitter, which is a real trap: emitting the alert *into* the journal would append an
+event the database does not yet have, so the **next** check would report drift caused by the
+monitor itself. That is why the CLI passes no emitter.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
@@ -379,9 +409,9 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Next actions
 
-1. **CR-09 continues.** Project fills, positions, facts, decisions and risk outcomes (only orders
-   and portfolio state are projected today). Add a rebuild command that drops and reconstructs
-   the projection tables, then schedule the drift check and alarm on it.
+1. **CR-09 continues.** Drift monitoring is in place; what remains is a supervised
+   long-running process, alert routing (there is no pager or webhook), long-duration
+   paper/shadow runs, latency and P&L attribution reporting, and the incident runbooks.
 2. **CR-03's last acceptance item is blocked on the owner**, not on code: a real paper round trip
    needs a write-scoped OAuth grant (`api.trade:write`).
 3. CR-04's engine half needs the wheel to install; the mode table and parity harness are done.

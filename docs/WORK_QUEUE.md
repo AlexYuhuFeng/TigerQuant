@@ -33,19 +33,21 @@ Last updated: 2026-10-10.
 | CR-06 | **PARTIAL** | `docs/evidence/cr06_model_interface.txt` | Provider-neutral path, versioned prompt contract, failure handling (every failure abstains) and the benchmark harness are done and tested. No provider has been called: that needs an API key. Status is `SIMULATED`. |
 | CR-07 | **COMPLETE** | `docs/evidence/cr07_risk_controls.txt` | Session limits (turnover, daily loss, drawdown, rolling order rate), the risk-metrics accumulator, and an independent watchdog whose only power is to stop. Includes the privilege-bypass suite and the "no alternative order path" source scan. |
 | CR-08 | PENDING | — | Depends on CR-05/CR-07 state to display |
-| CR-09 | **PARTIAL** | `docs/evidence/cr09_projection.txt` | The journal→database projector covers orders, fills, positions, portfolio state, decisions and risk outcomes, verified against real PostgreSQL with idempotent replay. Remaining: scheduling and alerting on drift, evidence-fact projection, and the watchdog hook. The long-duration harness and runbooks are not started. |
+| CR-09 | **PARTIAL** | `docs/evidence/cr09_projection.txt`, `docs/evidence/cr09_drift_monitoring.txt` | The journal→database projector covers orders, fills, positions, portfolio state, decisions and risk outcomes, verified against real PostgreSQL with idempotent replay, and drift monitoring with transition-based alerting and a measured alert rate is in place (`docs/evidence/cr09_drift_monitoring.txt`). Remaining: a supervised long-running process, alert routing, evidence-fact projection, long-duration paper/shadow runs, latency and P&L attribution, and the incident runbooks. |
 | CR-10 | PENDING | — | Documentation only; never activates anything |
 
 ## Current test and verification state
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **556 passed** |
-| `pytest -q -m "not requires_db"` | **536 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **576 passed** |
+| `pytest -q -m "not requires_db"` | **556 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
-| `mypy` (strict) | Success, 87 source files |
+| `mypy` (strict) | Success, 88 source files |
 | `ruff check` / `format --check` | Clean |
 | `tools/tiger_reconcile.py` | `RECONCILED=true` against the live Tiger paper account |
+| `tigerquant drift` | Detects real drift (exit 1) and reports consistent after projection (exit 0) |
+| `tigerquant project` | 31/31 events, idempotent on replay |
 
 ## External blockers (do not paper over these)
 
