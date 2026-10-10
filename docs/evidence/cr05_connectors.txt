@@ -109,15 +109,49 @@ $ python -m mypy
 Success: no issues found in 92 source files
 
 ===========================================================================
-7. Limitations
+7. Revision chaining (added after this file was first written)
+===========================================================================
+The gap recorded in the limitations has been closed. It was real: before chaining, a feed that
+re-served an article with a corrected figure left TWO facts that both looked current, and a
+snapshot could cite either. The Fact schema already anticipated this -- supersedes, vintages()
+and effective_fact() all existed -- and the field was left None.
+
+The rule now: a revision is the same DOCUMENT (same source, same external id) with different
+CONTENT. Identical content stays a duplicate; a different document starts its own chain.
+
+    $ ingest "Chipmaker raises guidance to 5.10."
+    fixture-news: fetched 1, admitted 1, duplicates 0
+    $ ingest "Chipmaker raises guidance to 5.25 (corrected)."
+    fixture-news: fetched 1, admitted 1, duplicates 0, revisions 1
+
+    fact:e9b754e740a6fb22d  supersedes=None
+    fact:b8a720fab13f5c8f7  supersedes=fact:e9b754e740a6fb22d
+
+    chain from newest: 3 revisions
+    oldest first bodies: ['to 5.10', 'to 5.25 (corrected)', 'to 5.30 (corrected again)']
+
+Three properties worth naming:
+
+  * NOTHING IS OVERWRITTEN. Both revisions are stored; the chain is a link, not an update. The
+    store is append-only and stays that way.
+  * THE LINK IS MADE BEFORE THE STORE SEES THE FACT, so there is no window in which two
+    revisions both look current. That window is exactly what supersedes exists to prevent.
+  * INDEXING IS LAZY AND READS THE STORE, so a pipeline started against an existing fact log
+    chains onto what is already there rather than treating every document as new. That is the
+    case that matters operationally: a restart is exactly when a feed is most likely to
+    re-serve something.
+
+And the payoff is not cosmetic: vintages() and effective_fact() now work on ingested content, so
+a replay at an earlier instant sees the revision that actually existed then. That was already
+true for facts constructed in-process and was the remaining gap for ingested ones.
+
+===========================================================================
+8. Limitations
 ===========================================================================
 1. NO REAL FEED HAS BEEN CONTACTED. There is no fetcher, because there is no verified
    entitlement. Every test runs against an in-code fixture connector. The fixture connector is
    labelled SYNTHETIC where it is used and is not a news feed.
-2. REVISION CHAINING IS NOT IMPLEMENTED. A feed that reformats its articles produces distinct
-   facts rather than a `supersedes` chain, so it would accumulate near-duplicates. The Fact
-   schema anticipates this (`supersedes` exists) and the field is left None; wiring it is the
-   correct next step and is not done.
+2. ~~REVISION CHAINING IS NOT IMPLEMENTED.~~ **CLOSED.** See section 7.
 3. No scheduling. Ingestion runs when a caller invokes it; there is no poller, no backoff and
    no rate limiting, and a real feed would need all three.
 4. Only news-shaped documents. There is no connector for filings, earnings calendars or

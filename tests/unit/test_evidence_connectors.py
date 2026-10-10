@@ -217,19 +217,18 @@ class TestIngestion:
         assert second.duplicates == 1
         assert len(tuple(store.iter_facts())) == 1
 
-    def test_changed_content_produces_a_distinct_fact(self, store: DurableFactStore) -> None:
-        """A refetch whose content changed is a NEW fact, not a silently-updated one.
+    def test_changed_content_becomes_a_superseding_revision(self, store: DurableFactStore) -> None:
+        """The same document with different content is a REVISION, not a second fact.
 
-        This is the honest behaviour and it is worth stating: the store never overwrites. It
-        also exposes a real gap -- reconciling these into a `supersedes` revision chain is what
-        the Fact schema anticipates and is NOT implemented, so a feed that reformats its
-        articles would accumulate near-duplicates. Recorded as a CR-05 limitation rather than
-        smoothed over by folding whitespace, which would have conflated genuinely different
-        documents.
+        This test used to assert the opposite. Before revision chaining, a feed that reformatted
+        an article produced two facts that both looked current, and a snapshot could cite
+        either -- the gap recorded in docs/evidence/cr05_connectors.txt. The Fact schema already
+        anticipated it (`supersedes`, `vintages()`, `effective_fact()`), and the field was left
+        None.
         """
         since, until = window_for(AT, minutes=120)
         pipeline = make_pipeline(store)
-        pipeline.ingest(connector(CLEAN), since=since, until=until)
+        first = pipeline.ingest(connector(CLEAN), since=since, until=until)
         reformatted = RawDocument(
             source_id=WIRE,
             external_id="doc-1",
@@ -238,10 +237,111 @@ class TestIngestion:
             published_at=CLEAN.published_at,
         )
         second = pipeline.ingest(connector(reformatted), since=since, until=until)
+
+        assert first.admitted == 1
+        assert first.revisions == 0, "the first revision supersedes nothing"
         assert second.admitted == 1
-        assert len(tuple(store.iter_facts())) == 2
-        # Nothing was overwritten, and no revision link was invented either.
+        assert second.revisions == 1, "the second is a revision of the first"
+
+        facts = tuple(store.iter_facts())
+        assert len(facts) == 2
+        original, revision = facts
+        assert original.supersedes is None
+        assert revision.supersedes == original.fact_id
+
+    def test_a_byte_identical_refetch_is_still_a_duplicate_not_a_revision(
+        self, store: DurableFactStore
+    ) -> None:
+        """Identical content is the same revision, so it must not create a chain link."""
+        since, until = window_for(AT, minutes=120)
+        pipeline = make_pipeline(store)
+        pipeline.ingest(connector(CLEAN), since=since, until=until)
+        second = pipeline.ingest(connector(CLEAN), since=since, until=until)
+        assert second.duplicates == 1
+        assert second.revisions == 0
+        assert len(tuple(store.iter_facts())) == 1
+
+    def test_a_third_revision_chains_onto_the_second(self, store: DurableFactStore) -> None:
+        """The chain follows content order, not insertion order."""
+        since, until = window_for(AT, minutes=120)
+        pipeline = make_pipeline(store)
+        bodies = ["First version.", "Second version.", "Third version."]
+        for body in bodies:
+            pipeline.ingest(
+                connector(
+                    RawDocument(
+                        source_id=WIRE,
+                        external_id="doc-1",
+                        title="Title",
+                        body=body,
+                        published_at=AT - dt.timedelta(minutes=5),
+                    )
+                ),
+                since=since,
+                until=until,
+            )
+
+        facts = tuple(store.iter_facts())
+        assert len(facts) == 3
+        assert facts[0].supersedes is None
+        assert facts[1].supersedes == facts[0].fact_id
+        assert facts[2].supersedes == facts[1].fact_id
+
+    def test_a_different_document_is_not_a_revision(self, store: DurableFactStore) -> None:
+        """Chaining keys on (source, external id). A different document starts its own chain."""
+        since, until = window_for(AT, minutes=120)
+        pipeline = make_pipeline(store)
+        pipeline.ingest(connector(CLEAN), since=since, until=until)
+        other = RawDocument(
+            source_id=WIRE,
+            external_id="doc-other",
+            title="A different article",
+            body="Unrelated content.",
+            published_at=AT - dt.timedelta(minutes=5),
+        )
+        report = pipeline.ingest(connector(other), since=since, until=until)
+        assert report.revisions == 0
         assert all(fact.supersedes is None for fact in store.iter_facts())
+
+    def test_revisions_are_reported(self, store: DurableFactStore) -> None:
+        since, until = window_for(AT, minutes=120)
+        pipeline = make_pipeline(store)
+        pipeline.ingest(connector(CLEAN), since=since, until=until)
+        revised = RawDocument(
+            source_id=WIRE,
+            external_id="doc-1",
+            title=CLEAN.title,
+            body="Corrected figure.",
+            published_at=CLEAN.published_at,
+        )
+        report = pipeline.ingest(connector(revised), since=since, until=until)
+        assert "revisions 1" in report.summary()
+        assert report.as_record()["revisions"] == 1
+
+    def test_chaining_works_after_a_restart(self, store: DurableFactStore) -> None:
+        """A new pipeline over an existing store indexes what is already there.
+
+        This is the case that matters operationally: a restart is exactly when a feed is most
+        likely to re-serve something, and a pipeline that started with an empty index would
+        treat every document as new.
+        """
+        since, until = window_for(AT, minutes=120)
+        make_pipeline(store).ingest(connector(CLEAN), since=since, until=until)
+
+        # A SECOND pipeline, built over the same store, with no memory of the first.
+        fresh = make_pipeline(store)
+        revised = RawDocument(
+            source_id=WIRE,
+            external_id="doc-1",
+            title=CLEAN.title,
+            body="Corrected after restart.",
+            published_at=CLEAN.published_at,
+        )
+        report = fresh.ingest(connector(revised), since=since, until=until)
+        assert report.revisions == 1
+
+        facts = tuple(store.iter_facts())
+        assert facts[1].supersedes == facts[0].fact_id
 
 
 class TestInjectionHandling:

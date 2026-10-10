@@ -108,6 +108,8 @@ class IngestionReport:
     admitted: int
     duplicates: int
     injection_flagged: int
+    #: Admitted facts that SUPERSEDE an earlier revision of the same document.
+    revisions: int = 0
     rejections: tuple[tuple[str, str], ...] = ()
 
     @property
@@ -124,6 +126,8 @@ class IngestionReport:
             f"admitted {self.admitted}",
             f"duplicates {self.duplicates}",
         ]
+        if self.revisions:
+            parts.append(f"revisions {self.revisions}")
         if self.injection_flagged:
             parts.append(f"INJECTION-FLAGGED {self.injection_flagged}")
         if self.rejections:
@@ -137,6 +141,7 @@ class IngestionReport:
             "admitted": self.admitted,
             "duplicates": self.duplicates,
             "injection_flagged": self.injection_flagged,
+            "revisions": self.revisions,
             "rejected": self.rejected,
             "clean": self.clean,
             "rejections": [
@@ -153,7 +158,7 @@ class IngestionPipeline:
     caveat.
     """
 
-    __slots__ = ("_clock", "_registry", "_staleness", "_store")
+    __slots__ = ("_clock", "_indexed", "_latest", "_registry", "_staleness", "_store")
 
     def __init__(
         self,
@@ -167,6 +172,14 @@ class IngestionPipeline:
         self._store = store
         self._clock = clock
         self._staleness = staleness
+        #: (source_id, external_id) -> the newest fact id for that document.
+        #:
+        #: Built lazily from the store rather than held in memory only, so a pipeline started
+        #: against an existing fact log chains onto what is already there instead of treating
+        #: every document as new. That matters after a restart, which is exactly when a feed
+        #: is most likely to re-serve something.
+        self._latest: dict[tuple[str, str], str] = {}
+        self._indexed = False
 
     def ingest(
         self,
@@ -185,6 +198,7 @@ class IngestionPipeline:
         admitted = 0
         duplicates = 0
         flagged = 0
+        revisions = 0
         rejections: list[tuple[str, str]] = []
 
         for document in connector.fetch(since=window_start, until=window_end):
@@ -196,12 +210,29 @@ class IngestionPipeline:
                 continue
             if was_flagged:
                 flagged += 1
+
+            # A revision is the same document with different content. Link it to what it
+            # replaces BEFORE the store sees it, so the chain is complete the moment the fact
+            # exists -- a window where both revisions look current is exactly the situation
+            # `supersedes` exists to prevent.
+            previous = self._supersedes_for(fact)
+            if previous is not None:
+                fact = fact.model_copy(update={"supersedes": previous})
+
             if self._store.add(fact):
                 admitted += 1
+                if previous is not None:
+                    revisions += 1
             else:
                 # Already present. Not an error: re-running an ingestion is expected after a
                 # crash, and the content hash makes it idempotent.
                 duplicates += 1
+
+            # Track the newest revision either way, so a second ingest in the same pass chains
+            # onto the right predecessor rather than onto the one from the store.
+            external_id = str(fact.attributes.get("external_id", ""))
+            if external_id:
+                self._latest[(source.source_id, external_id)] = fact.fact_id
 
         return IngestionReport(
             connector_id=connector.connector_id,
@@ -209,8 +240,38 @@ class IngestionPipeline:
             admitted=admitted,
             duplicates=duplicates,
             injection_flagged=flagged,
+            revisions=revisions,
             rejections=tuple(rejections),
         )
+
+    def _index_existing(self) -> None:
+        """Learn which revision of each document is already stored."""
+        if self._indexed:
+            return
+        for fact in self._store.iter_facts():
+            external_id = fact.attributes.get("external_id")
+            if external_id:
+                # Later facts win, and the store yields in append order, so a plain assignment
+                # leaves the newest. Revisions are appended, never rewritten.
+                self._latest[(fact.source_id, str(external_id))] = fact.fact_id
+        self._indexed = True
+
+    def _supersedes_for(self, fact: Fact) -> str | None:
+        """The fact this one replaces, or None when it is the first revision.
+
+        A revision is the same DOCUMENT -- same source, same external id -- with different
+        CONTENT. Without this, a feed that re-serves an article with a corrected figure would
+        leave two facts that both look current, and a snapshot could cite either.
+        """
+        self._index_existing()
+        external_id = str(fact.attributes.get("external_id", ""))
+        if not external_id:
+            return None
+        key = (fact.source_id, external_id)
+        previous = self._latest.get(key)
+        if previous is None or previous == fact.fact_id:
+            return None
+        return previous
 
     # -- the checks --------------------------------------------------------------
 
