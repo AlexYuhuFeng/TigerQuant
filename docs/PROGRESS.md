@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: code-side CR-03 unblocking complete; awaiting the owner's consent
+Current CR: CR-05 gap closed; CR-03 awaits the owner's consent page
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -532,6 +532,45 @@ the authorization URL, so the warning is on screen while the consent page is rea
 One test was wrong on the first run and is worth recording: it asserted that a read-only session
 refuses an *exact-match* grant of the read scopes, which is not what "refuse anything not
 requested" means. The assertion was right to fail; corrected rather than papered over.
+
+### 2026-10-10 — CR-05 revision chaining: the recorded gap, closed
+
+Full evidence: `docs/evidence/cr05_connectors.txt` section 7. This was the gap I found *while
+writing* the connectors evidence and recorded rather than smoothed over — a feed that re-served
+an article with a corrected figure left **two facts that both looked current**, and a snapshot
+could cite either. The Fact schema already anticipated it (`supersedes`, `vintages()`,
+`effective_fact()` all existed) and the field was left `None`.
+
+The rule now: a revision is the same **document** (same source, same external id) with different
+**content**. Identical content stays a duplicate; a different document starts its own chain.
+
+```
+$ ingest "Chipmaker raises guidance to 5.10."
+fixture-news: fetched 1, admitted 1, duplicates 0
+$ ingest "Chipmaker raises guidance to 5.25 (corrected)."
+fixture-news: fetched 1, admitted 1, duplicates 0, revisions 1
+
+fact:e9b754e740a6fb22d  supersedes=None
+fact:b8a720fab13f5c8f7  supersedes=fact:e9b754e740a6fb22d
+
+chain from newest: 3 revisions
+oldest first bodies: ['to 5.10', 'to 5.25 (corrected)', 'to 5.30 (corrected again)']
+```
+
+Three properties worth naming. **Nothing is overwritten** — the chain is a link, not an update,
+so the store stays append-only. **The link is made before the store sees the fact**, so there is
+no window in which two revisions both look current. And **indexing is lazy and reads the store**,
+so a pipeline started against an existing fact log chains onto what is already there — the case
+that matters operationally, because a restart is exactly when a feed re-serves something. That
+one is tested by building a *second* pipeline over the same store with no memory of the first.
+
+The payoff is not cosmetic: `vintages()` and `effective_fact()` now work on ingested content, so
+a replay at an earlier instant sees the revision that actually existed then.
+
+**One test asserted the old behaviour and was rewritten, not deleted.** It documented the gap by
+asserting `all(fact.supersedes is None)`; it now asserts the chain, with the old reasoning kept
+in the docstring. Five more cover the byte-identical case, a third revision, a different
+document, the reported count, and the restart.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
