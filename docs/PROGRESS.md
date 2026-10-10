@@ -1,14 +1,14 @@
 # Durable progress state
 
-Status: CR-00, CR-01 complete. CR-02 and CR-05 substantially delivered and verified.
-Current CR: CR-02 remaining item (read-only cash/position/order reconciliation), then CR-03+
+Status: CR-00, CR-01 and CR-02 complete. CR-05 substantially delivered and verified.
+Current CR: CR-07 (risk policy set and watchdog) — deliberately before CR-03
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
 Paper orders: not enabled (CR-03); the credential in use could not place one
 Live orders: PERMANENTLY DISABLED FOR AUTONOMOUS DEVELOPMENT
-Implementation status: `PAPER_VERIFIED` for authorization and account discovery;
-`SIMULATED` for everything else.
+Implementation status: `PAPER_VERIFIED` for authorization, account discovery, and read-only
+cash/position/order retrieval with reconciliation; `SIMULATED` for everything else.
 
 ## How to resume
 
@@ -90,6 +90,33 @@ Full evidence: `docs/evidence/cr02_authorization.txt`.
 reconciles them against our own ledger. Authorization and account discovery are done; the
 reconciliation half is not.
 
+### 2026-10-10 — CR-02 complete: guarded read-only client and reconciliation
+
+Full evidence: `docs/evidence/cr02_reconciliation.txt`.
+
+- `adapters/tiger/read.py` reads cash, positions and working orders through the verified paper
+  account and compares them with our ledger. Live result: cash 1 000 000.00 USD, 0 positions,
+  0 working orders, `RECONCILED=true`.
+- **It cannot write.** The public surface is `verify_account`, `assets`, `positions`,
+  `open_orders`, `snapshot` plus properties. A test asserts no public member matches any broker
+  write API name, and the constructor re-checks rather than trusting the test. The account guard
+  is re-verified on **every** snapshot, before any data is read.
+- **It reports; it never corrects.** A quantity mismatch, a broker-only holding, a ledger-only
+  holding or a cash difference all make `is_reconciled` false, and the ledger is left untouched.
+  A test asserts the ledger digest is unchanged after a mismatch — a silent correction would
+  destroy the evidence needed to find the cause (gate 15).
+- **Two real-API discoveries**, both invisible from the SDK documentation:
+  1. `get_assets()` and `get_open_orders()` return **plain lists**, not the `response.assets` /
+     `response.result` envelopes the docstrings describe. The read path accepts both shapes.
+  2. The paper environment reports **`inf`** for figures it does not compute
+     (`gross_position_value`, `available_funds`, and others). `inf` is the *absence* of a value,
+     not a very large one: `broker_decimal()` maps every non-finite value to `None`, the caller
+     records it in `missing_fields`, and nothing is silently zeroed. Converting `inf` would have
+     poisoned every downstream calculation, and `Decimal("Infinity").quantize(...)` raises anyway.
+
+CR-02's gate — "account type verified via API, cash/positions/orders read and reconciled; no
+submit path" — is met. Nothing has been submitted, modified or cancelled.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
@@ -114,15 +141,14 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Known limitations (honest list)
 
-- **CR-02 is not finished.** Cash/position/order reconciliation is unimplemented, so the gate
-  ("read and reconciled") is not met. Everything else about authorization is verified.
-- **CR-03 is not started.** No order has been placed, modified or cancelled. The current token
-  could not place one even if asked; a write-scoped grant would be a separate, deliberate owner
-  decision with its own ADR.
-- CR-04/CR-06 are not started. `nautilus_trader==1.231.0` and `litellm==1.104.2` are pinned and
+- **CR-03 is not started, and deliberately so.** No order has been placed, modified or cancelled.
+  The current credential holds read-only scopes and could not place one. Submitting orders before
+  CR-07's turnover, day-loss, drawdown and order-rate limits exist would be the wrong order of
+  work, so **CR-07 comes next**.
+- CR-04 and CR-06 are not started. `nautilus_trader==1.231.0` and `litellm==1.104.2` are pinned and
   lock-resolved but not installed or exercised.
-- The engine's extras and the LLM extra are not in the running environment; only `dev`, `db` and
-  the minimal `broker` dependency set needed for account discovery are.
+- The engine and LLM extras are not in the running environment; only `dev`, `db` and the minimal
+  `broker` dependency set needed for account discovery are.
 - The `broker` extra's full dependency tree was installed piecewise during debugging. Run
   `uv sync --frozen --extra broker` (or `--all-extras`) before trusting that environment; the
   lock is authoritative, not the current venv state.
@@ -150,10 +176,9 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Next actions
 
-1. Finish CR-02: the guarded read-only client (assets, positions, open orders) plus reconciliation
-   against the ledger, with the account guard applied on every call.
+1. **CR-07 — the full risk policy set and the watchdog.** Turnover, day-loss, drawdown and
+   order-rate limits, the kill switch, and the privilege-bypass tests. This is the gate that must
+   be in place before CR-03 can submit anything.
 2. Wire the projection repository into the replay and paper pipelines so the database is actually
    fed, and add the journal-versus-database drift check (CR-09 detector).
-3. CR-07 next in value: the full risk policy set (turnover, day-loss, drawdown, order rate) and the
-   watchdog, since CR-03 must not ship without them.
-4. CR-04 (NautilusTrader adapter) and CR-06 (model service) remain buildable offline.
+3. CR-04 (NautilusTrader adapter) and CR-06 (model service) remain buildable offline.

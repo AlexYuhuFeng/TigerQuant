@@ -1,0 +1,104 @@
+﻿TigerQuant CR-02 verification evidence - guarded read-only client and reconciliation
+Generated: see the git commit this file was added in
+Implementation status: PAPER_VERIFIED for authorization, account discovery, and
+                      read-only cash/position/order retrieval with reconciliation.
+                      Order submission is NOT implemented (CR-03) and is not authorized.
+
+===========================================================================
+1. Live read against the Tiger paper account
+===========================================================================
+$ python tools/tiger_reconcile.py
+ACCOUNT=*************2713
+CURRENCY=USD
+CASH=1000000.00
+NET_LIQUIDATION=1000000.00
+BUYING_POWER=4000000.00
+GROSS_POSITION_VALUE=0.00
+POSITIONS=0
+OPEN_ORDERS=0
+MISSING_FIELDS=gross_position_value,available_funds
+OPENING_CASH_SOURCE=adopted from the broker, because no journal cash was supplied. A mid-session restart must pass --opening-cash from the journal instead.
+OPENING_CASH=1000000.00
+RECONCILED=true
+RECONCILIATION=reconciled with *************2713: 0 position(s), 0 open order(s), cash 1000000.00
+[exit code: 0]
+
+===========================================================================
+2. What the live response actually looked like
+===========================================================================
+get_assets(account=...) returns a PLAIN LIST of PortfolioAccount, not the
+  response.assets envelope the SDK docstring describes. Same for get_open_orders()
+  (a plain list, not response.result). The read path accepts both shapes.
+
+The paper environment reports inf for figures it does not compute:
+  cash                 = 1000000.0
+  net_liquidation      = 1000000.0
+  buying_power         = 4000000.0
+  gross_position_value = inf      <-- NOT a very large number
+  available_funds      = inf      <-- it is the ABSENCE of one
+  currency             = USD
+
+broker_decimal() therefore maps every non-finite value to None, and the caller
+records it in BrokerBalances.missing_fields instead of substituting zero.
+Converting inf would have poisoned every downstream calculation, and
+Decimal("Infinity").quantize(...) raises anyway. Reported in the run above as:
+  MISSING_FIELDS=gross_position_value,available_funds
+
+===========================================================================
+3. Structural read-only guarantee
+===========================================================================
+TigerReadOnlyClient exposes: verify_account, assets, positions, open_orders,
+snapshot, account, masked_account, last_snapshot. It holds the SDK TradeClient
+privately and never returns it.
+
+tests/unit/test_tiger_read.py::test_no_public_member_is_named_after_a_write_api
+asserts that no public member matches any of:
+  place_order, modify_order, cancel_order, submit_order, create_order, preview_order
+The constructor re-checks this and raises rather than exposing a write method.
+
+The account guard is re-verified on EVERY snapshot(), before any data is read, so a
+grant that has acquired a live account since the last check is refused first.
+test_the_guard_refuses_before_any_read covers that path.
+
+===========================================================================
+4. Reconciliation reports; it never corrects
+===========================================================================
+reconcile(snapshot, ledger) compares broker state with our ledger and reports:
+  matched, differences (quantity deltas), broker_only, ledger_only, cash difference.
+It does not adjust the ledger. A discrepancy means one of the two records is wrong
+and we do not know which, so the only safe response is to stop opening new exposure
+and tell a human (ADR-0003 s3, acceptance gate 15). Any silent correction would
+destroy exactly the evidence needed to find the cause.
+
+tests/unit/test_tiger_read.py::test_a_quantity_mismatch_is_reported_and_not_corrected
+asserts the ledger digest is unchanged after a mismatch is detected.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+386 passed
+
+$ python -m pytest tests/unit/test_tiger_read.py -q
+31 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 72 source files
+
+===========================================================================
+6. CR-02 gate assessment
+===========================================================================
+Gate: "Account type verified via API, cash/positions/orders read and reconciled;
+       no submit path"
+
+  [x] account type verified via the API  -> accountType == PAPER, unique, shape-checked
+  [x] cash read                          -> 1000000.00 USD
+  [x] positions read                     -> 0 (flat), sorted, zero-rows dropped
+  [x] orders read                        -> 0 working orders
+  [x] reconciled                         -> RECONCILED=true
+  [x] no submit path                     -> no write member; read-only credential
+
+CR-02 is COMPLETE. Nothing has been submitted, modified or cancelled.
