@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-08 dashboard, CR-09 long-duration runs and runbooks, CR-10 readiness doc
+Current CR: CR-08 dashboard; CR-09 long-duration runs and runbooks
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -341,6 +341,37 @@ reports `blocks_new_exposure` as a fact and the watchdog decides. And it emits n
 given no emitter, which is a real trap: emitting the alert *into* the journal would append an
 event the database does not yet have, so the **next** check would report drift caused by the
 monitor itself. That is why the CLI passes no emitter.
+
+### 2026-10-10 — CR-10 complete: live-readiness review (documentation, not activation)
+
+Deliverable: `docs/LIVE_READINESS.md`.
+
+This CR is documentation only, and the document is written so that it could not be mistaken for
+a runbook. It does not describe how to turn live trading on; it describes what a **human** would
+have to work through before live trading could be *considered*, and what is honestly not ready.
+
+- **Ten hard preconditions**, each requiring a **named human** and written evidence, each marked
+  **not done**. Two deserve emphasis because an implementation-focused review would miss both:
+  *market-data entitlements* are a commercial fact, not a code fact, and are currently
+  **unverified**; and the *risk policy values* (2% daily loss, 5% drawdown, 2× turnover) are
+  engineering judgement, not a calibration to anyone's capital or tolerance.
+- **Why paper success is not sufficient**, stated concretely: no queue position, no market
+  impact, no partial-fill reality, no real rejections, no latency, and indicative rather than
+  entitled data. Every one is a reason a paper result *overstates* live behaviour.
+- **Isolated-runtime plan** with the built and unbuilt parts marked separately. The honest gaps:
+  there is no worker container, and no per-mode alert routing.
+- **Remaining failure modes, ranked worst first.** The top entry is not an engineering failure at
+  all — a strategy that is wrong in a way that is profitable in backtest. Overfitting and
+  survivorship bias are statistical failures that no amount of test coverage detects.
+- **Hard boundaries** that survive every future change, including that an agent never relaxes a
+  risk limit and never presents a paper result as live-verified.
+
+**The claims are code-checked.** `tests/unit/test_live_readiness.py` asserts that `Mode.LIVE`
+still refuses translation, that no non-paper mode reports submission capability without explicit
+human authorization, that the project status is not `LIVE_VERIFIED`, that the safety checks are
+all passing, and that the document contains no step-by-step activation procedure and no
+precondition marked done. A readiness document that quietly goes stale is worse than none,
+because it is exactly what a human would rely on.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
