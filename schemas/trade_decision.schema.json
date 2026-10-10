@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AI Trade Proposal (untrusted until verified)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "NO_TRADE",
+        "HOLD",
+        "SET_TARGET",
+        "REDUCE",
+        "CLOSE"
+      ]
+    },
+    "instrument": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target_weight": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "horizon": {
+      "type": "string",
+      "minLength": 1
+    },
+    "thesis": {
+      "type": "string"
+    },
+    "counter_thesis": {
+      "type": "string"
+    },
+    "invalidation": {
+      "type": "string"
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "uncertainties": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decision_id": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "snapshot_id",
+    "model_version",
+    "action",
+    "instrument",
+    "target_weight",
+    "horizon",
+    "thesis",
+    "counter_thesis",
+    "invalidation",
+    "evidence_ids",
+    "uncertainties",
+    "decision_id"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "SET_TARGET"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "instrument": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_weight": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "instrument",
+          "target_weight"
+        ]
+      }
+    }
+  ]
+}

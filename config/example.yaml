@@ -1,0 +1,29 @@
+# NON-SECRET EXAMPLE ONLY. This does not connect to a brokerage account.
+app:
+  name: TigerQuant
+  environment: paper
+  allow_live: false
+  allowed_instruments: ["SPY", "QQQ"] # examples; owner must separately approve universe
+broker:
+  provider: tigeropen
+  account_alias: paper_primary
+  require_reported_account_type: PAPER
+  execution_enabled: false # CR-03 requires verified paper-only authorization
+  secret_ref: "secret://tigerquant/dev/paper" # placeholder; not a real secret
+model:
+  gateway: litellm
+  alias: trader-primary
+  intended_provider: deepseek
+  intended_model: deepseek-flash
+  allow_unreviewed_fallback_for_live: false
+risk:
+  gross_exposure_fraction: 0.5  # illustrative policy, never trading advice
+  max_symbol_fraction: 0.1
+  max_order_fraction: 0.02
+  daily_loss_halt_fraction: 0.01
+  allow_margin: false
+  allow_short: false
+  allow_options: false
+security:
+  model_has_broker_write_access: false
+  live_activation_by_agent: false
