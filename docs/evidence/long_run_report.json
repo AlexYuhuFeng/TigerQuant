@@ -1,11 +1,11 @@
 {
-  "bars": 390,
-  "bars_per_second": "53.1",
-  "decisions": 390,
+  "bars": 1950,
+  "bars_per_second": "69.3",
+  "decisions": 1950,
   "deterministic": true,
-  "events": 2158,
+  "events": 8632,
   "final_cash": "95202.36",
-  "final_equity": "100563.64",
+  "final_equity": "102810.04",
   "invariants_checked": [
     "journal hash chain verifies after the whole run",
     "journal and database agree after projecting the whole run",
@@ -15,13 +15,13 @@
     "journal and database agree after projecting the whole run",
     "every fill traces back to a decision"
   ],
-  "journal_digest": "sha256:ef6e4ed0bffd03fa426584c1f0265307b7af4cb2a3534c02faf88a126904618b",
+  "journal_digest": "sha256:49c917391bf00560792acabcc70ec026be8def55b9520b2a2806c09a9aef1bae",
   "ok": true,
   "orders_filled": 1,
   "orders_submitted": 1,
-  "risk_denials": 197,
-  "sessions": 1,
-  "simulated_span_hours": "6.50",
+  "risk_denials": 275,
+  "sessions": 5,
+  "simulated_span_hours": "32.50",
   "violations": [],
-  "wall_seconds": "7.3485"
+  "wall_seconds": "28.1384"
 }

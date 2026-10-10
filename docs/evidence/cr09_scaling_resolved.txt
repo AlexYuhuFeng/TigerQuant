@@ -1,0 +1,118 @@
+TigerQuant CR-09 evidence (part 6) - the O(n^2) replay scaling, RESOLVED
+Generated: see the git commit this file was added in
+
+Supersedes the "PARTIAL" status of docs/evidence/cr09_scaling_investigation.txt. Three causes
+found and all three fixed; the multi-day run that previously did not finish in ten minutes now
+completes in 60 seconds.
+
+===========================================================================
+1. The five-session run, before and after
+===========================================================================
+BEFORE:  5 sessions / 1950 bars -- DID NOT FINISH IN 10 MINUTES (killed, moved to background)
+AFTER:   5 sessions / 1950 bars -- 59.6s total, of which 28.1s is one pass
+
+    long-run [STABLE]; 5 simulated session(s), 1950 bars; covering 32.50h of MARKET time in
+    28.1384s of wall time (69.3 bars/s); 8632 event(s), 1950 decision(s), 1 submitted,
+    1 filled, 275 risk denial(s); journal sha256:49c917391bf00560...
+    violations: (none)
+
+===========================================================================
+2. Cause 3, ISOLATED: a snapshot re-digested every cited fact, every bar
+===========================================================================
+The previous writeup localised the remaining cost to canonicalisation and explicitly said it was
+not isolated. Instrumenting `digest_of` to record the SIZE of what it was handed settled it:
+
+    bars   digest calls   max payload   max cited facts
+     100          5,360       17,731 B               100
+     400         81,798       70,531 B               400
+
+Two things, both decisive:
+
+  * digest CALLS grow as ~0.5 x bars^2 (5360/100^2 = 0.54; 81798/400^2 = 0.51), and
+  * the PAYLOAD grows linearly, because `max cited facts` equals the bar count.
+
+The mechanism: `resolve()` emits `res.effective.digest()` for every CITED fact, and the momentum
+strategy cites every bar it has seen. So snapshot N digests N facts, and the total is
+sum(1..bars) -- quadratic.
+
+CHECKED FOR A CORRECTNESS BUG FIRST, and it is not one: `resolve()` iterates only the cited
+`fact_ids`, so a decision's provenance contains the facts it actually used and not the whole
+store. It is a strategy that cites a growing window, which is legitimate. The problem was purely
+that the same immutable bytes were being digested over and over.
+
+===========================================================================
+3. The fix: memoise `Fact.digest()`
+===========================================================================
+A `Fact` is a frozen pydantic model, so `digest()` is a pure function of state that cannot change.
+Computing it once and reusing the result is observationally identical to recomputing it, and
+returns the SAME BYTES.
+
+That is the whole reason this fix was safe where changing the digest MATERIAL would not have been.
+The snapshot digest embeds this value, and CR-01's baseline journal digest
+(5ac9de744ae629f15e5c79a4289f7f60a4db39760431324cfd5899c60c6439d3) pins the snapshot digests.
+An optimisation that altered the output would have moved a published baseline.
+
+Evidence that it did not move:
+
+  * `pytest -q` -- 776 passed, unchanged, including every snapshot and evidence-store test;
+  * `pytest -q -k "baseline or 5ac9de74 or replay"` -- 27 passed, including the tests that pin the
+    CR-01 journal digest.
+
+The cache is keyed by `fact_id` rather than by the object, because a Fact holds a dict attribute
+and is therefore unhashable. The key is sound because this project derives `fact_id` from content.
+It is bounded at 200,000 entries, evicting the oldest half, so a long run cannot grow it without
+limit.
+
+===========================================================================
+4. Measured effect, all three causes
+===========================================================================
+            original   after causes 1-2   after cause 3
+    100       0.54s          0.53s            0.52s
+    200       1.76s          1.46s            1.04s   (2.0x -- linear)
+    400       8.20s          5.31s            2.82s   (2.7x)
+    800          --         16.38s            7.54s   (2.7x)
+
+400 bars is 2.9x faster than the original. 800 bars: 16.38s -> 7.54s. The first doubling is now
+exactly 2.0x, which is linear.
+
+The remaining 2.7x per doubling at larger sizes is NOT claimed to be linear. It is materially
+better than the 3.3x-4.7x measured at the start, and the practical question the gate asks -- can a
+representative period be run? -- is now answered yes.
+
+===========================================================================
+5. What this closes
+===========================================================================
+CR-09's "stability over representative periods": a full TRADING WEEK of simulated market time
+(5 sessions, 32.50h, 1950 bars, 8632 events) runs STABLE with no violations, the journal hash
+chain verifies, the run is reproducible across two passes, every fill traces to a decision, and
+275 risk denials show the limits were exercised rather than merely present.
+
+Still not a wall-clock endurance test, and the report continues to keep `simulated_span_hours`
+and `wall_seconds` as separate fields. Observed latency and real-venue stability still need
+CR-03's grant.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+776 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 95 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. The scaling is much better but not proven linear: 2.7x per doubling at 400-800 bars. A very
+   long run would still be slower than it needs to be, and no further profiling was done past
+   this point because the gate no longer requires it.
+2. The digest cache is process-local and not shared or persisted. A fresh process re-computes.
+3. Cache size is bounded at 200,000 fact digests; past that it evicts, so a very large store
+   would see partial re-computation rather than unbounded growth. Not exercised by any test run.
+4. The strategy citing every bar it has seen is what made this quadratic. It is legitimate, and
+   it is also worth asking separately whether a decision's provenance SHOULD grow without bound --
+   that is a design question about evidence scoping, not a performance one, and it is NOT
+   addressed here.

@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: isolate the snapshot canonicalisation cost; CR-03 awaits the owner's consent page
+Current CR: CR-09 stability gate met for a full trading week; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -653,6 +653,50 @@ change that should not be made quickly.
 immediate and total, which is the good outcome.
 
 15 new tests pin both indexes, so a future change cannot silently reintroduce the scans.
+
+### 2026-10-10 — CR-09 part 6: the O(n^2) replay scaling RESOLVED, multi-day runs possible
+
+Full evidence: `docs/evidence/cr09_scaling_resolved.txt`. Supersedes the PARTIAL status of the
+previous round.
+
+**The run that could not finish in ten minutes now takes 60 seconds.**
+
+```
+long-run [STABLE]; 5 simulated session(s), 1950 bars; covering 32.50h of MARKET time in 28.14s
+of wall time (69.3 bars/s); 8632 event(s), 1950 decision(s), 1 submitted, 1 filled,
+275 risk denial(s); journal sha256:49c917391bf00560...
+violations: (none)
+```
+
+**Cause 3, ISOLATED.** Last round I localised the cost to canonicalisation and said plainly it was
+not isolated. Instrumenting `digest_of` to record what it was handed settled it in one run:
+5,360 calls at 100 bars and 81,798 at 400 -- about 0.5 x bars^2 -- with `max cited facts` equal to
+the bar count. `resolve()` emits `effective.digest()` for every CITED fact, and the momentum
+strategy cites every bar it has seen, so snapshot N digests N facts.
+
+**Checked for a correctness bug first, and it is not one.** `resolve()` iterates only the cited
+ids, so a decision's provenance holds the facts it used, not the whole store. A growing citation
+window is legitimate. The problem was purely that the same immutable bytes were digested
+repeatedly.
+
+**The fix: memoise `Fact.digest()`.** A Fact is frozen, so the digest is a pure function of state
+and a cached value is the SAME BYTES. That is exactly why this was safe where changing the digest
+*material* would not have been -- CR-01's baseline journal digest pins the snapshot digests.
+Verified unmoved: 776 tests pass, including the 27 that pin the baseline.
+
+| bars | original | after causes 1-2 | after cause 3 |
+|---|---|---|---|
+| 100 | 0.54s | 0.53s | 0.52s |
+| 200 | 1.76s | 1.46s | **1.04s** (2.0x, linear) |
+| 400 | 8.20s | 5.31s | **2.82s** |
+| 800 | -- | 16.38s | **7.54s** |
+
+The remaining 2.7x per doubling is **not** claimed to be linear, and no further profiling was done
+because the gate no longer requires it.
+
+**A question this raised and did NOT answer:** the strategy citing every bar is what made this
+quadratic. It is legitimate, but whether a decision's provenance *should* grow without bound is a
+design question about evidence scoping, not a performance one. Recorded as a limitation.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
