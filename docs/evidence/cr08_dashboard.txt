@@ -1,0 +1,154 @@
+TigerQuant CR-08 evidence - lineage, dashboard and report exports
+Generated: see the git commit this file was added in
+
+Gate: "Operator can inspect complete decision/evidence/execution lineage; isolation shown
+      distinctly"
+
+===========================================================================
+1. Live lineage from the real journal
+===========================================================================
+$ python -m tigerquant report out/cr09_journal.jsonl --mode BACKTEST
+
+lineage [BACKTEST]: 6 decision(s), 1 fill(s), clean
+
+  abstentions: 0
+  decisions: 6
+  events_read: 31
+  journal_mode: BACKTEST
+  note: This view is built from ONE journal. Every fact above belongs to mode 'BACKTEST'
+        alone; nothing from another mode is merged into it.
+  reached_the_venue: 1
+  refused_by_risk: 0
+
+decision bt-dec_01KJQG32W00003  [SET_TARGET]
+  decided_at      2026-03-02T14:44:00+00:00
+  model/prompt    reference-momentum-rule-based / reference-rules-v1
+  snapshot        snap:9e5f4b03c40ab47263514bd3
+  evidence        cited 4, available 4
+  risk            ALLOW (1 checks) reasons: -
+  order           bt-oi_01KJQG32W00000 client=TQ-bt-7a949ce259a6 venue=SIM-4887753B15F1
+  states          OrderIntentCreated -> OrderSubmitted -> OrderAcknowledged -> OrderFilled
+  fill            exec:c278132b52ce76b97e7b 8 @ 602.5602 (commission 0.04)
+  ledger after    cash 95179.48 equity 100015.48
+
+One unbroken chain: decision -> snapshot -> cited evidence -> risk verdict with the checks that
+ran -> order intent -> venue order -> the state sequence it passed through -> the execution ->
+the ledger afterwards. Every hop is read from the journal, which is the record of authority
+(ADR-0004), so the view describes what actually happened rather than what an in-memory object
+currently believes.
+
+Exports: --format json (stable machine form), --format csv (one row per decision), --format text.
+
+===========================================================================
+2. Fabricated citations would be visible, not merely rejected
+===========================================================================
+LineageRecord.evidence_not_shown is the set of evidence IDs a decision cited MINUS the fact IDs
+the snapshot actually contained. Validation already rejects such a decision, so the field is
+always empty in a healthy run - but if it ever is not, the operator sees a fabricated citation
+in the lineage table and in the text report (`** FABRICATED`), rather than having to infer it
+from a rejection code.
+
+The report's is_clean flag is true only when every order and fill traces back to a decision AND
+no fabrication exists, and the CLI exits 1 when it is false, so this is usable as a gate.
+
+===========================================================================
+3. Isolation shown distinctly
+===========================================================================
+The gate asks for isolation to be "shown distinctly", and the failure it guards against is an
+operator reading one mode's numbers while believing they are another's. So the mode is stated
+in three places at once:
+
+  * in the report facts (`journal_mode`) with an explicit note that nothing from another mode
+    is merged in;
+  * in an HTTP header, `X-TigerQuant-Mode`, on EVERY response including errors, so a scripted
+    consumer cannot collect two modes without noticing which is which;
+  * in a banner on the index page: "MODE: BACKTEST - every number on this page comes from the
+    <journal> journal and nothing from any other mode is merged in".
+
+A test asserts two reports of the same events under different mode labels have different
+digests, so the label is part of the identity rather than decoration.
+
+===========================================================================
+4. The dashboard is read-only and loopback-only BY CONSTRUCTION
+===========================================================================
+$ python -m tigerquant dashboard out/cr09_journal.jsonl --mode BACKTEST
+binds 127.0.0.1:8787, read-only, no auth, no TLS, blocks until Ctrl-C.
+
+Verified live, in-process, then stopped:
+
+  REFUSED 0.0.0.0 bind: ok
+  bound at http://127.0.0.1:63960
+  GET /health       -> 200, mode header=BACKTEST, bytes=61
+  GET /lineage.json -> 200, mode header=BACKTEST, bytes=8934
+  POST /lineage.json -> 405 (405 expected)
+  /../../etc/passwd  -> 404 (404 expected)
+
+Four properties, each enforced rather than documented:
+
+  READ-ONLY          only GET and HEAD are answered; POST, PUT, PATCH and DELETE return 405
+                     with a body explaining why. The handler's only capability is to render a
+                     journal handed to it at construction - there is no code path from an
+                     HTTP request to a journal read.
+  LOOPBACK-ONLY      the constructor refuses any host outside {127.0.0.1, ::1, localhost}.
+                     Tested against 0.0.0.0, 192.168.1.10, :: and example.com. AGENTS.md
+                     restricts this project to the development workspace and paper services;
+                     a flag that COULD expose it is a flag that eventually will.
+  NO TRAVERSAL       a fixed route table of five entries. A request path is only ever a
+                     dictionary lookup, never a filesystem path. Traversal attempts 404.
+  NO JAVASCRIPT      zero JS on the page, which removes an injection surface; every
+                     interpolated value is HTML-escaped, including ones we generate ourselves
+                     (tested by injecting a script tag into the journal filename).
+
+The page says on itself that it is a development view with no authentication, no TLS and no
+multi-user story. It is an inspection tool, not a deployment artifact.
+
+===========================================================================
+5. A real bug the tests found
+===========================================================================
+Responding to a refused method WITHOUT draining the request body left unread bytes in the
+socket, so the connection was reset and the client saw ConnectionAbortedError instead of the
+405 the server had just sent. Found by the test that POSTs a body - which is exactly why that
+test posts one rather than sending a bare POST. The handler now drains Content-Length bytes
+before answering.
+
+Also worth recording: the traversal test initially failed because an unclosed HTTPError leaks a
+ResourceWarning and this project runs pytest with filterwarnings = ["error"]. Every error
+response in the tests now goes through one helper that reads and closes it.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+621 passed
+
+$ python -m pytest tests/unit/test_dashboard_lineage.py -q
+34 passed (three consecutive runs, to rule out socket flakiness)
+
+$ python -m tigerquant doctor
+[PASS] determinism (no uuid4 / wall-clock calls outside core.clock): clean
+[PASS] mode capabilities (no submission in BACKTEST/SHADOW, LIVE gated): clean
+[PASS] no live enablement surface in source: clean
+[PASS] implementation status is labelled: SIMULATED
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 90 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. The dashboard is single-journal. Comparing two modes side by side would be genuinely useful
+   and is deliberately NOT built: the whole isolation story depends on a view being one mode,
+   and a side-by-side view is where numbers get confused. It would need an explicit design.
+2. It reads the journal file, not the database. So it shows what the journal says, which is
+   authoritative, but it does not show drift - use `tigerquant drift` for that. Wiring the
+   drift result into the page is the obvious next step.
+3. No authentication of any kind, and no TLS. Loopback-only is the entire access control.
+4. The page is rendered entirely at startup. A long-running dashboard would show stale content
+   until restarted; refreshing means restarting, which is honest but not convenient.
+5. Report exports cover lineage only. There is no P&L attribution report, no latency report and
+   no incident timeline - the remaining CR-09 items.
+6. No pagination or filtering. A journal with tens of thousands of decisions would render one
+   very large page and a very large CSV.

@@ -21,13 +21,15 @@ from typing import TYPE_CHECKING
 from tigerquant import IMPLEMENTATION_STATUS, __version__
 from tigerquant.core.clock import SystemClock
 from tigerquant.core.enums import Mode, capabilities_for
-from tigerquant.core.errors import IntegrationUnavailable, TigerQuantError
+from tigerquant.core.errors import ConfigurationError, IntegrationUnavailable, TigerQuantError
 from tigerquant.db.postgres import PostgresRepository, connect
 from tigerquant.db.projector import check_drift, project
 from tigerquant.events.journal import AppendOnlyJournal
 from tigerquant.events.registry import event_type_names
 from tigerquant.market.fixtures import load_scenario
+from tigerquant.ops.dashboard import DashboardServer, build_app
 from tigerquant.ops.drift_monitor import DriftMonitor
+from tigerquant.ops.lineage_report import build_lineage, export
 from tigerquant.pipeline.replay import run_replay
 
 if TYPE_CHECKING:
@@ -112,6 +114,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="how many checks to run when --interval-seconds is positive",
     )
     drift.add_argument("--report", type=Path, default=None, help="write the JSON report here")
+
+    report = sub.add_parser(
+        "report",
+        help="render decision/evidence/execution lineage from a journal",
+    )
+    report.add_argument("journal", type=Path, help="audit journal JSONL to read")
+    report.add_argument(
+        "--mode",
+        default=Mode.BACKTEST.value,
+        choices=[mode.value for mode in Mode],
+        help="the mode this journal belongs to; it is stamped on the output",
+    )
+    report.add_argument(
+        "--format",
+        default="text",
+        choices=("text", "json", "csv"),
+        help="output format",
+    )
+    report.add_argument("--out", type=Path, default=None, help="write here instead of stdout")
+
+    dash = sub.add_parser(
+        "dashboard",
+        help="serve the lineage on loopback, read-only (development inspection tool)",
+    )
+    dash.add_argument("journal", type=Path, help="audit journal JSONL to display")
+    dash.add_argument(
+        "--mode",
+        default=Mode.BACKTEST.value,
+        choices=[mode.value for mode in Mode],
+        help="the mode this journal belongs to",
+    )
+    dash.add_argument("--host", default="127.0.0.1", help="loopback address only")
+    dash.add_argument("--port", type=int, default=8787, help="port to bind")
     return parser
 
 
@@ -194,6 +229,60 @@ def _cmd_drift(args: argparse.Namespace) -> int:
         args.report.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
     return 0 if results[-1].consistent else 1
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Render lineage for one journal. Read-only: this command writes nothing but its output."""
+    mode = Mode(args.mode)
+    path = Path(args.journal)
+    with AppendOnlyJournal(path, mode, fsync=False) as journal:
+        events = tuple(record.event for record in journal.iter_records())
+
+    report = build_lineage(events, mode=mode.value)
+    rendered = export(report, args.format)
+
+    if args.out is not None:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(rendered, encoding="utf-8")
+        print(f"wrote {args.out} ({report.summary()})")
+    else:
+        print(rendered)
+
+    # A non-zero exit for a report that needs attention makes this usable as a gate.
+    return 0 if report.is_clean else 1
+
+
+def _cmd_dashboard(args: argparse.Namespace) -> int:
+    """Serve the lineage read-only on loopback.
+
+    Binds only a loopback address: there is no authentication and no TLS, so anything else
+    would be an exposed endpoint. Prints the URL and blocks until interrupted.
+    """
+    mode = Mode(args.mode)
+    path = Path(args.journal)
+    with AppendOnlyJournal(path, mode, fsync=False) as journal:
+        events = tuple(record.event for record in journal.iter_records())
+
+    report = build_lineage(events, mode=mode.value)
+    app = build_app(report, journal=str(path))
+    try:
+        server = DashboardServer(app, host=args.host, port=args.port)
+    except ConfigurationError as exc:
+        print(f"refusing to serve: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"mode {mode.value}: {report.summary()}")
+    print(f"serving read-only on {server.base_url} (loopback only; no auth, no TLS)")
+    print("Ctrl-C to stop.")
+    try:
+        server.start()
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\nstopping")
+    finally:
+        server.stop()
+    return 0
 
 
 def _dev_dsn(mode: Mode) -> str:
@@ -411,6 +500,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "replay": _cmd_replay,
         "project": _cmd_project,
         "drift": _cmd_drift,
+        "report": _cmd_report,
+        "dashboard": _cmd_dashboard,
         "verify-journal": _cmd_verify,
         "doctor": _cmd_doctor,
     }

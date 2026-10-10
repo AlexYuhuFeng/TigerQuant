@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-08 dashboard; CR-09 long-duration runs and runbooks
+Current CR: CR-09 long-duration runs, reports and runbooks
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -372,6 +372,37 @@ human authorization, that the project status is not `LIVE_VERIFIED`, that the sa
 all passing, and that the document contains no step-by-step activation procedure and no
 precondition marked done. A readiness document that quietly goes stale is worse than none,
 because it is exactly what a human would rely on.
+
+### 2026-10-10 — CR-08 complete: lineage, dashboard and report exports
+
+Full evidence: `docs/evidence/cr08_dashboard.txt`.
+
+The gate's two halves drove the design. "Complete decision/evidence/execution lineage" defines
+the data structure; "isolation shown distinctly" defines what must be impossible to misread.
+
+- `ops/lineage_report.py` assembles one record per decision carrying **every hop**: the snapshot
+  it was shown, the evidence it cited versus what the snapshot contained, the risk verdict with
+  the checks that ran, the order intent, the venue order, the state sequence, the fills, and the
+  ledger afterwards. It reads the **journal**, not live objects, so it describes what actually
+  happened.
+- **Fabricated citations would be visible, not merely rejected.** `evidence_not_shown` is cited
+  minus shown. Validation already rejects such a decision, so it is always empty in a healthy
+  run — but if it ever is not, the operator *sees* a fabrication in the lineage rather than
+  inferring it from a rejection code. The CLI exits 1 when a report is not clean, so it works as
+  a gate.
+- **Isolation is stated in three places at once**, because the failure it guards against is
+  reading one mode's numbers as another's: in the report facts with an explicit note, in an
+  `X-TigerQuant-Mode` **header on every response including errors**, and in a banner on the page.
+- **The dashboard is read-only and loopback-only by construction**, not by policy. Only GET and
+  HEAD are answered; the constructor refuses any host outside loopback (tested against `0.0.0.0`,
+  a LAN address, `::` and a hostname); a fixed five-entry route table means a request path is
+  only ever a dictionary lookup; and there is no JavaScript, with every interpolated value
+  escaped — including ones we generate ourselves.
+
+**A real bug the tests found:** responding to a refused method without draining the request body
+left unread bytes in the socket, so the connection reset and the client saw
+`ConnectionAbortedError` instead of the 405 the server had sent. The test that POSTs a *body* is
+what caught it.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
