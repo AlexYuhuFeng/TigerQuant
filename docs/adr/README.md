@@ -15,5 +15,7 @@ Each ADR records one decision that is expensive to reverse. Status values: `Acce
 | [0009](ADR-0009-model-provider-neutrality.md) | Model provider neutrality | Accepted |
 | [0010](ADR-0010-nautilustrader-adapter.md) | NautilusTrader integration as an external adapter | Accepted |
 | [0011](ADR-0011-deterministic-time-and-identifiers.md) | Deterministic time and identifiers | Accepted |
+| [0012](ADR-0012-tiger-oauth-read-only-scope.md) | Tiger OAuth 2.0 with a read-only scope ceiling | Accepted |
+| [0013](ADR-0013-database-architecture.md) | Database architecture: portable PostgreSQL projections beside a portable journal | Accepted |
 
 Companion documents: [THREAT_MODEL.md](../THREAT_MODEL.md), [COMPONENT_MAP.md](../COMPONENT_MAP.md), [DEPENDENCIES.md](../DEPENDENCIES.md), [CR-01-VERTICAL-SLICE.md](../CR-01-VERTICAL-SLICE.md).

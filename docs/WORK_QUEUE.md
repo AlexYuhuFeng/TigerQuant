@@ -24,25 +24,43 @@ Last updated: 2026-10-10.
 
 | ID | Status | Evidence | Notes |
 |---|---|---|---|
-| CR-00 | **COMPLETE** | `docs/adr/` (11 ADRs), `docs/THREAT_MODEL.md`, `docs/COMPONENT_MAP.md`, `docs/DEPENDENCIES.md`, `pyproject.toml` + `uv.lock`, `docs/integrations/*`, `docs/evidence/cr00_pypi_probe.json` | Vendor APIs verified against pinned tags, not "latest" docs |
-| CR-01 | **COMPLETE** | `docs/evidence/cr01_verification.txt`, `docs/evidence/replays/`, `docs/CR-01-VERTICAL-SLICE.md`, 223 tests | Fully offline; `SIMULATED` |
-| CR-02 | **BLOCKED** | — | Requires a Tiger paper account; none exists in this environment. Adapter + fake-SDK contract tests can still be built offline, labelled `SIMULATED` |
-| CR-03 | **BLOCKED** | — | Same blocker; depends on CR-02 |
-| CR-04 | READY | — | Buildable offline; `nautilus_trader==1.231.0` cp314 wheel confirmed |
-| CR-05 | READY | interfaces frozen in CR-01 (`evidence/`) | Buildable offline |
+| CR-00 | **COMPLETE** | `docs/adr/` (13 ADRs), `docs/THREAT_MODEL.md`, `docs/COMPONENT_MAP.md`, `docs/DEPENDENCIES.md`, `pyproject.toml` + `uv.lock`, `docs/integrations/*`, `docs/evidence/cr00_pypi_probe.json` | Vendor APIs verified against pinned tags, not "latest" docs |
+| CR-01 | **COMPLETE** | `docs/evidence/cr01_verification.txt`, `docs/evidence/replays/`, `docs/CR-01-VERTICAL-SLICE.md` | Fully offline; `SIMULATED` |
+| CR-02 | **PARTIAL — NOT CLOSED** | `docs/evidence/cr02_authorization.txt` | Authorization, scope ceiling and paper-account verification are done and recorded as `PAPER_VERIFIED`. The gate's second half — reading cash/positions/orders and **reconciling** them — is **not implemented**, so the gate is not met. |
+| CR-03 | **NOT STARTED** | — | No order has been placed, modified or cancelled. The current credential holds read-only scopes and could not place one. A write-scoped grant would be a separate, deliberate owner decision with its own ADR. |
+| CR-04 | READY | — | Buildable offline; `nautilus_trader==1.231.0` cp314 wheel confirmed, not yet installed |
+| CR-05 | **SUBSTANTIALLY DELIVERED** | `docs/evidence/cr05_database.txt`, `docs/adr/ADR-0013-database-architecture.md` | Calendar, source registry, per-category staleness, untrusted-text sandboxing, durable fact log, vintage-correct revisions, derivation lineage, and the containerised PostgreSQL layer are implemented and tested. Not marked complete: news/filing ingestion connectors do not exist yet. |
 | CR-06 | READY | interfaces frozen in CR-01 (`decision/provider.py`) | Offline provider + benchmark harness buildable without a live key |
-| CR-07 | READY | baseline gate in CR-01 (`risk/`) | Full policy set, watchdog, kill switch |
+| CR-07 | READY | baseline gate in CR-01 (`risk/`) | Full policy set, watchdog, kill switch. **Should precede CR-03.** |
 | CR-08 | PENDING | — | Depends on CR-05/CR-07 state to display |
-| CR-09 | PENDING | fault harness laid in CR-01 | Needs CR-02/03 for real paper evidence |
+| CR-09 | PENDING | fault harness laid in CR-01 | Needs CR-02/CR-03 for real paper evidence |
 | CR-10 | PENDING | — | Documentation only; never activates anything |
+
+## Current test and verification state
+
+| Command | Result |
+|---|---|
+| `pytest -q` (PostgreSQL running) | **354 passed** |
+| `pytest -q -m "not requires_db"` | **334 passed**, 20 deselected |
+| `pytest -q -m requires_db` | **20 passed** against a real container |
+| `mypy` (strict) | Success, 71 source files |
+| `ruff check` / `format --check` | Clean |
 
 ## External blockers (do not paper over these)
 
-1. **No Tiger credentials.** The environment has no Tiger paper account, private key or tiger id, and
-   none may be requested for development (AGENTS.md invariant 1, README "Do not supply Tiger private
-   keys to DSH"). CR-02/CR-03 integration evidence therefore cannot exist yet. Everything built for
-   them stays labelled `SIMULATED` until a real paper session is recorded.
-2. **No remote CI runner.** `.github/workflows/ci.yml` is written and its commands are executed
+1. **No remote CI runner.** `.github/workflows/ci.yml` is written and its commands are executed
    locally with identical results, but no GitHub run exists to link.
-3. **No PyPI advisory access for `pip-audit`.** The audit command is wired into CI but could not run
-   here; it is not reported as passing.
+2. **No PyPI advisory access for `pip-audit`.** The audit command is wired into CI but could not
+   run here; it is not reported as passing.
+3. **Docker Hub is unreachable** from this network. `deploy/compose.yaml` pulls the same official
+   Postgres image through `public.ecr.aws`; the digest is recorded in
+   `docs/evidence/cr05_database.txt`.
+4. **Market-data entitlements are unverified.** Quote permissions are purchased separately from
+   trading access and have not been exercised.
+
+## Resolved blockers (kept for the record)
+
+- ~~No Tiger credentials.~~ **Resolved by the owner** on 2026-10-10: an OAuth 2.0 grant for the
+  simulation paper account, read-only scopes. The live-capable account that the same grant also
+  exposed is refused by the account guard, and no live access is wanted or needed.
+
