@@ -455,18 +455,38 @@ class TestPrivilegeBypass:
         assert ReasonCode.CHECK_ERROR in outcome.reason_codes
 
     def test_only_one_module_may_call_a_broker_write_api(self) -> None:
-        """The 'no alternative order path' rule, enforced over the source tree."""
+        """The 'no alternative order path' rule, enforced over the source tree.
+
+        Uses the AST, not a text search. Two false positives proved a grep is the wrong tool:
+        the NautilusTrader adapter legitimately *defines* ``submit_order`` to satisfy the
+        engine's override points, and this module's own prose names the APIs it forbids. A
+        control that forces code to avoid certain words is a control nobody will keep.
+        """
+        import ast
         from pathlib import Path
 
         src = Path(__file__).resolve().parents[2] / "src" / "tigerquant"
+        banned = {"place_order", "modify_order", "cancel_order", "submit_order"}
         offenders: list[str] = []
+
         for path in sorted(src.rglob("*.py")):
             if path.as_posix().endswith("adapters/tiger/execution.py"):
                 continue
-            text = path.read_text(encoding="utf-8")
-            for banned in ("place_order(", "modify_order(", "cancel_order(", "submit_order("):
-                if banned in text:
-                    offenders.append(f"{path.relative_to(src)}:{banned}")
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                function = node.func
+                name = (
+                    function.attr
+                    if isinstance(function, ast.Attribute)
+                    else function.id
+                    if isinstance(function, ast.Name)
+                    else None
+                )
+                if name in banned:
+                    offenders.append(f"{path.relative_to(src)}:{node.lineno}:{name}()")
+
         assert not offenders, f"broker write calls found outside the single adapter: {offenders}"
 
     def test_clock_is_injected_so_a_halt_cannot_be_time_travelled_around(self) -> None:

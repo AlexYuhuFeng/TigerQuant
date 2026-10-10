@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-04's engine half (blocked on the wheel), CR-09 scheduling, CR-08
+Current CR: CR-04 strategy-loop parity, CR-09 scheduling, CR-08 dashboard
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -271,39 +271,46 @@ been called, because that needs an API key this project does not hold.
    case is a provider that lets an exception escape `propose()`. Both are now tested
    separately, because they look identical from a distance and mean opposite things.
 
-### 2026-10-10 — CR-04 partial: mode translation and execution parity
+### 2026-10-10 — CR-04: the engine adapter, built against the source
 
 Full evidence: `docs/evidence/cr04_engine_adapter.txt`.
 
-**The engine-agnostic half is done; the half that needs the engine wheel is not.** That split is
-not an excuse — ADR-0010 says explicitly that the internal contracts are engine-agnostic on
-purpose so the other CRs stay testable without a large compiled wheel, and this is that decision
-paying off.
+**An earlier note in this file was wrong.** I had recorded the NautilusTrader install as failed
+after three attempts. It had actually **succeeded** — the non-zero exit came from PowerShell
+treating the process's *stderr progress output* as a `NativeCommandError`. `nautilus_trader
+1.231.0` imports fine. On this platform, exit code alone is not evidence about a tool that
+writes progress to stderr; the version check is. That correction is recorded because it nearly
+cost a whole CR.
 
-- **Mode translation** (`adapters/nautilus/modes.py`). NautilusTrader's `Environment` is
-  `{BACKTEST, SANDBOX, LIVE}` — there is no `PAPER`. The counter-intuitive row is
-  **`PAPER + BROKER → engine LIVE`**: a Tiger paper account is reached over the ordinary
-  production gateway with a real API and a real order state machine, so the engine must be LIVE
-  to connect. What makes it *paper* is the **account identity**, verified from the broker's own
-  response — not the engine environment. Mapping it to `SANDBOX` because both sound like "not
-  real money" would label a real venue connection as a local simulation.
-- Two refusals, both deliberate. **`PAPER` without a submission target is refused**, because
-  defaulting to `BROKER` would let an unconfigured run reach a real venue and defaulting to
-  `NONE` would silently make a paper run a simulation. And **`LIVE` is refused outright** — that
-  refusal *is* the control, not a gap.
-- **Parity harness** (`execution/parity.py`) drives two brokers through an identical command
-  list and classifies every divergence: **structural** (a different state or fill count — a
-  contract violation, and a failure), **labelled** (a different price or commission — expected
-  between venues, and reported rather than hidden), or **timing**. The verdict is named
-  `comparable`, deliberately not `equal`.
+**ADR-0010 was right, and it mattered.** The ADR says the published guides describe the v2
+Rust-core line and cannot be trusted for 1.231.0. Reading the `.pyx` that ships *inside the
+wheel* found two differences that would each have made the adapter silently non-functional:
 
-**A bug the harness found in itself:** its QUERY path left `average_fill_price` as `None`, so
-two venues filling the same quantity at different prices were reported as *identical* — the
-exact smoothing the module promises not to do. The test comparing two scripted prices caught it.
+| documented (v2) | actual 1.231.0 |
+|---|---|
+| `__init__(loop, client_id, venue, …)` | `__init__(client_id, venue, oms_type, account_type, base_currency, msgbus, cache, clock)` |
+| `async def _submit_order(command)` | `cpdef void submit_order(SubmitOrder command)` |
 
-**Blocked:** `uv pip install "nautilus_trader==1.231.0"` has now been started three times and has
-not completed on this network. The adapter classes and the interface-shape compatibility test
-need it. Recorded as **not executed**, never as passing.
+An adapter written from the guides would have imported cleanly and **never intercepted a single
+order** — the private coroutine names don't exist, so nothing would have been called. A third
+fact came from the same source: `_set_account_id` raises unless `client_id ==
+account_id.get_issuer()`, which my first `AccountId("TIGER-PAPER")` violated.
+
+Everything verified is now pinned in `adapters/nautilus/compat.py`, so a wheel bump that moves a
+class, renames a method or changes the environment enum fails loudly.
+
+The guarded `ExecutionClient` **constructs and connects against the real engine**, with three
+tested gates: the submission gate (refuses and *records* when `submission_target` is `NONE`), the
+approval check (no path submits without an `ApprovedOrder`), and translation (refuses an unknown
+side, order type, missing price or bad quantity). Cancellation is deliberately **not** gated —
+a risk control that can block a cancel is dangerous.
+
+**A control this CR had to fix rather than work around.** The privilege-bypass scan for "no
+alternative order path" searched for literal strings like `submit_order(` and produced two false
+positives: the Nautilus adapter legitimately *defines* `submit_order` to satisfy the engine's
+override points, and a docstring names the APIs it forbids. A control that forces code to avoid
+certain words is a control nobody keeps, so the scan now uses the **AST** and looks for call
+nodes. Verified afterwards that it still catches a real violation.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
@@ -329,11 +336,12 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Known limitations (honest list)
 
-- **CR-04 is partial.** The mode translation table and the execution parity harness are done and
-  tested. The NautilusTrader `InstrumentProvider` / `DataClient` / `ExecutionClient` classes and
-  the interface-shape compatibility test are **not written**, because
-  `nautilus_trader==1.231.0` has not installed on this network across three attempts. A wheel
-  bump therefore cannot yet fail loudly, which ADR-0010 requires it to.
+- **CR-04 is partial.** The engine is installed and verified, the mode table, interface contract,
+  guarded `ExecutionClient` and parity harness are all done. What is missing is *strategy-loop*
+  parity — running a Nautilus node through the same scenario the internal simulator runs — which
+  needs a kernel, a data client and a strategy registration. `DataClient` and
+  `InstrumentProvider` are pinned by the compatibility test but not written, because without a
+  verified market-data entitlement there is nothing for them to load.
 - **CR-03 is partial.** The guarded write adapter exists and is tested, but **no order has ever
   been submitted**, so its status is `SIMULATED`. The remaining acceptance item is a real paper
   round trip, which needs a write-scoped OAuth grant — an owner decision, not a coding task.

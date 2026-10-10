@@ -28,7 +28,7 @@ Last updated: 2026-10-10.
 | CR-01 | **COMPLETE** | `docs/evidence/cr01_verification.txt`, `docs/evidence/replays/`, `docs/CR-01-VERTICAL-SLICE.md` | Fully offline; `SIMULATED` |
 | CR-02 | **COMPLETE** | `docs/evidence/cr02_authorization.txt`, `docs/evidence/cr02_reconciliation.txt` | Gate met: account type verified via the API, cash/positions/orders read and reconciled, and no submit path exists. `PAPER_VERIFIED`. |
 | CR-03 | **PARTIAL — BLOCKED on a write-scoped grant** | `docs/evidence/cr03_execution_adapter.txt` | The guarded write adapter and all four safety gates exist and are tested against a fake SDK, including timeout→UNKNOWN with no retry, partial fills, and the `order.account` hazard. **No order has ever been submitted**, because the credential is deliberately read-only. Status is `SIMULATED`, not `PAPER_VERIFIED`. A write-scoped grant is an owner decision, not a coding task. |
-| CR-04 | **PARTIAL — engine wheel not installed** | `docs/evidence/cr04_engine_adapter.txt` | Mode translation (including why PAPER maps to the engine's LIVE, and why LIVE is refused) and the execution parity harness are done and tested. The NautilusTrader client classes and the interface-shape compatibility test need `nautilus_trader==1.231.0`, whose install has not completed on this network. |
+| CR-04 | **PARTIAL** | `docs/evidence/cr04_engine_adapter.txt` | Engine installed and verified. Mode translation, the interface-shape contract, the guarded `ExecutionClient` (constructed and gated against the real wheel) and the parity harness are all done and tested. Outstanding: strategy-loop parity across backtest and paper, and parity against a real Tiger paper session (needs CR-03's grant). |
 | CR-05 | **SUBSTANTIALLY DELIVERED** | `docs/evidence/cr05_database.txt`, `docs/adr/ADR-0013-database-architecture.md` | Calendar, source registry, per-category staleness, untrusted-text sandboxing, durable fact log, vintage-correct revisions, derivation lineage, and the containerised PostgreSQL layer are implemented and tested. Not marked complete: news/filing ingestion connectors do not exist yet. |
 | CR-06 | **PARTIAL** | `docs/evidence/cr06_model_interface.txt` | Provider-neutral path, versioned prompt contract, failure handling (every failure abstains) and the benchmark harness are done and tested. No provider has been called: that needs an API key. Status is `SIMULATED`. |
 | CR-07 | **COMPLETE** | `docs/evidence/cr07_risk_controls.txt` | Session limits (turnover, daily loss, drawdown, rolling order rate), the risk-metrics accumulator, and an independent watchdog whose only power is to stop. Includes the privilege-bypass suite and the "no alternative order path" source scan. |
@@ -40,10 +40,10 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **539 passed** |
-| `pytest -q -m "not requires_db"` | **519 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **556 passed** |
+| `pytest -q -m "not requires_db"` | **536 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
-| `mypy` (strict) | Success, 84 source files |
+| `mypy` (strict) | Success, 87 source files |
 | `ruff check` / `format --check` | Clean |
 | `tools/tiger_reconcile.py` | `RECONCILED=true` against the live Tiger paper account |
 
