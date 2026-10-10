@@ -1,7 +1,8 @@
 # Durable progress state
 
-Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-05 substantially delivered and verified.
-Current CR: CR-03 (Tiger paper orders) — now unblocked by CR-07
+Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and tested;
+a real paper round trip is blocked on a write-scoped grant). CR-05 substantially delivered.
+Current CR: CR-09 wiring (projection repository into the pipelines) — offline work
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -148,6 +149,40 @@ activity, so CR-07 adds the accumulator and the limits that read it.
 **Why CR-07 had to precede CR-03:** submitting orders under a policy that bounds only a single
 order at a time would mean having operated without session limits, and the evidence would show it.
 
+### 2026-10-10 — CR-03 partial: the guarded execution adapter (SIMULATED)
+
+Full evidence: `docs/evidence/cr03_execution_adapter.txt`.
+
+**CR-03 is partial and the missing part is not a coding task.** The adapter, all four safety
+gates and the ambiguity handling are built and tested against a fake Tiger SDK. No order has
+ever reached the venue, because the credential is deliberately read-only, so the status is
+`SIMULATED` — not `PAPER_VERIFIED`.
+
+Four independent gates stand between an intent and a real order, on the assumption that any one
+of them could have a bug:
+
+1. **Write-scoped credential.** `require_write_scope()` refuses to construct the client unless
+   the grant includes `api.trade:write`. This is what makes the repository's default state
+   "cannot submit" rather than "submits carefully".
+2. **A PAPER account verified from the broker's own response** (ADR-0003 §3).
+3. **A single-use risk approval**, with the adapter holding a second lock: a repeated
+   `client_order_id` is refused locally.
+4. **An account match at the last line before the network.** This closes a real hazard found in
+   CR-02 research: `place_order` sends `order.account`, **not** `config.account`, so the SDK lets
+   an order built for one account be submitted through a client configured for another.
+
+"Never retried" is proved by counting calls after a `TimeoutError`, not by prose. There is also
+no client-side idempotency claim: Tiger documents no client-order-id field with idempotency
+semantics, so `external_id` is a correlation hint only.
+
+**A correction made during this CR, worth recording.** The first version reported
+`implementation_status == PAPER_VERIFIED` as soon as it held a write scope and a verified
+account. That was wrong: it had never submitted anything. Holding the right configuration is a
+*precondition* for paper trading, not *evidence* of it — reporting `PAPER_VERIFIED` there is
+exactly the placeholder-that-appears-production-ready that AGENTS.md invariant 11 forbids. The
+status is now derived from observation: it upgrades only when the venue returns an order id, and
+a failed or timed-out submission does not upgrade it. Both behaviours are tested.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
@@ -172,10 +207,12 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Known limitations (honest list)
 
-- **CR-03 is not started.** No order has been placed, modified or cancelled. The current
-  credential holds read-only scopes and could not place one. A write-scoped grant is a separate,
-  deliberate owner decision with its own ADR; the guarded write adapter can be built and tested
-  against the deterministic fake broker meanwhile.
+- **CR-03 is partial.** The guarded write adapter exists and is tested, but **no order has ever
+  been submitted**, so its status is `SIMULATED`. The remaining acceptance item is a real paper
+  round trip, which needs a write-scoped OAuth grant — an owner decision, not a coding task.
+  Fills are derived at cumulative-average precision rather than per execution, because Tiger's
+  `get_order` reports cumulative filled quantity; per-execution detail needs `get_transactions`
+  (documented as prime accounts only) or a push subscription, which is CR-09 work.
 - CR-04 and CR-06 are not started. `nautilus_trader==1.231.0` and `litellm==1.104.2` are pinned and
   lock-resolved but not installed or exercised.
 - The engine and LLM extras are not in the running environment; only `dev`, `db` and the minimal
@@ -207,10 +244,11 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Next actions
 
-1. **CR-03 — Tiger PAPER order integration and the order state machine.** The state machine,
-  reconciliation and quarantine paths already exist and are tested against the deterministic fake
-  broker; what CR-03 adds is the guarded Tiger write adapter behind the single write call site.
-  CR-07's session limits are now in place, so this is no longer premature.
+1. **CR-03's last acceptance item is blocked on the owner**, not on code: a real paper round trip
+   needs a write-scoped OAuth grant (`api.trade:write`). Everything buildable without it is built
+   and tested. Meanwhile, continue with offline work.
 2. Wire the projection repository into the replay and paper pipelines so the database is actually
-  fed, and add the journal-versus-database drift check (CR-09 detector).
-3. CR-04 (NautilusTrader adapter) and CR-06 (model service) remain buildable offline.
+   fed, and add the journal-versus-database drift check (CR-09 detector). This is the largest
+   piece of real remaining work that needs no external permission.
+3. CR-04 (NautilusTrader adapter) and CR-06 (provider-neutral model service) are buildable offline.
+4. CR-05's remaining gap: news/filing ingestion connectors.

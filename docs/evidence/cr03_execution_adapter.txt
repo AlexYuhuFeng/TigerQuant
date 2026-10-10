@@ -1,0 +1,135 @@
+TigerQuant CR-03 evidence - guarded Tiger PAPER execution adapter
+Generated: see the git commit this file was added in
+
+Implementation status: **SIMULATED**. Not PAPER_VERIFIED.
+  The adapter exists, is wired to the existing order state machine, and is tested against a
+  fake Tiger SDK. It has NEVER submitted an order to the real venue, because the credential
+  this repository holds is deliberately read-only. Any claim stronger than SIMULATED would
+  be false, and AGENTS.md invariant 11 forbids that.
+
+===========================================================================
+1. CR-03 is PARTIAL. State it plainly.
+===========================================================================
+Gate: "Safe submit/cancel under paper-only policy; timeout/reconnect/partial-fill/unknown
+       outcome tests"
+
+  [x] the single guarded write adapter exists            adapters/tiger/execution.py
+  [x] timeout -> UNKNOWN, never retried                  tested (call count proves it)
+  [x] partial fill -> remainder reported                 tested
+  [x] unknown outcome -> not retried, needs reconcile    tested
+  [x] cancel ambiguity -> UNKNOWN                        tested
+  [x] paper-only enforcement                             four gates, all tested
+  [x] account-match assertion before the network         tested
+  [ ] a real paper order submitted end to end            **NOT DONE**
+
+The last line is the honest gap, and it is not a coding gap. It requires a write-scoped
+OAuth grant. The grant this project holds carries exactly four read scopes:
+    api.basic:read api.account:read api.quote:read api.trade:read
+Submitting an order needs api.trade:write, which the owner has deliberately not granted.
+Re-authorization is an owner action performed in a browser; no code path here can widen its
+own grant, and none should.
+
+===========================================================================
+2. Four independent gates between an intent and a real order
+===========================================================================
+The design assumption is that any ONE of these could have a bug, so all four must pass.
+
+Gate 1 - the credential must be able to trade.
+  require_write_scope() refuses to construct the client unless the grant includes
+  api.trade:write. This is what makes the repository's default state "cannot submit" rather
+  than "submits carefully". Tested against the actual scope string this project holds.
+
+Gate 2 - a PAPER account verified from the broker's own response.
+  The guard must have confirmed accountType == 'PAPER' (ADR-0003 s3). A STANDARD account
+  cannot be verified, so it cannot be used. Tested.
+
+Gate 3 - a single-use risk approval.
+  submit() accepts only an ApprovedOrder. The registry consumes the token exactly once, and
+  the adapter keeps a second lock on the same door: a repeated client_order_id is refused
+  locally. Tested, including that place_order is called exactly once.
+
+Gate 4 - an account match at the last line before the network.
+  This closes a REAL hazard found during CR-02 research: place_order sends order.account,
+  NOT config.account. The SDK therefore lets an Order built for one account be submitted
+  through a client configured for another. The order object is built with the VERIFIED
+  account and asserted immediately before the call. Tested by hijacking the order builder to
+  return the live-capable account and asserting place_order was never reached.
+
+===========================================================================
+3. Ambiguity is never resolved by guessing
+===========================================================================
+A timeout after transmission is not a failure to submit. The adapter returns
+BrokerOrderState.UNKNOWN with no broker order id, and the message says so explicitly.
+
+"Never retried" is proved by counting calls, not by prose:
+    sdk.calls.count("place_order") == 1     after a TimeoutError
+    sdk.calls.count("cancel_order") == 1    after a TimeoutError
+The SDK's own SKIP_RETRY_SERVICES excludes order mutations from its backoff logic, and this
+adapter adds no retry of its own. Reconciliation is the only way out (ADR-0008 s3).
+
+There is also NO client-side idempotency claim. Tiger documents no client-order-id field
+with idempotency semantics, so external_id is passed purely as a correlation hint and is
+never relied on to prevent a duplicate. Duplicate prevention rests on our own approval
+registry plus the local submitted-id set.
+
+===========================================================================
+4. Fill identity is stable, which is what makes booking idempotent
+===========================================================================
+Tiger's get_order reports CUMULATIVE filled quantity and an average price, not individual
+executions. A fill derived from it therefore carries a synthetic execution id:
+    tiger:{broker_order_id}:{cumulative_filled}
+That id is stable for a given cumulative state, so re-reading the same order produces the
+same exec_id and the ledger books it once (acceptance gate 7). Tested directly.
+
+This is exact for the cumulative position but NOT per-execution pricing. Per-execution
+detail needs get_transactions (documented as prime accounts only) or a push subscription;
+both are CR-09 work. Recorded as a limitation below rather than papered over.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+462 passed
+
+$ python -m pytest tests/unit/test_tiger_execution.py -q
+38 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 76 source files
+
+$ python -m tigerquant doctor
+[PASS] determinism (no uuid4 / wall-clock calls outside core.clock): clean
+[PASS] mode capabilities (no submission in BACKTEST/SHADOW, LIVE gated): clean
+[PASS] no live enablement surface in source: clean
+[PASS] implementation status is labelled: SIMULATED
+
+===========================================================================
+6. Limitations (explicit, not implied)
+===========================================================================
+1. The adapter has never touched the real venue. Every test above runs against a fake SDK.
+   The status is SIMULATED and stays SIMULATED until the venue returns an order id.
+2. Order submission is therefore impossible in the current configuration, by design.
+3. Fills are derived at cumulative-average precision, not per execution (see section 4).
+4. poll() returns an empty tuple. There is no push subscriber in CR-03; order state is
+   refreshed through query() during the execution service's reconcile pass. Push/long-poll
+   integration is CR-09 work.
+5. Time-in-force is passed through as our enum value and has not been validated against
+   Tiger's accepted set for every order type.
+6. No live-safety claim of any kind. The adapter cannot become LIVE_VERIFIED: that would
+   require a funded account this project does not use and must not use.
+
+===========================================================================
+7. A correction made during this CR
+===========================================================================
+The first version of this adapter reported implementation_status == PAPER_VERIFIED as soon
+as it held a write scope and a verified account. That was wrong: it had never submitted
+anything. Holding the right configuration is a PRECONDITION for paper trading, not EVIDENCE
+of it — reporting PAPER_VERIFIED there is precisely the "placeholder that appears
+production-ready" that AGENTS.md invariant 11 forbids.
+
+The status is now derived from observation: it becomes PAPER_VERIFIED only once the venue
+itself returns an order id, and a failed or timed-out submission does NOT upgrade it. Both
+behaviours are tested.
