@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: fix the cleared-condition suppression path (xfail); CR-03 awaits the owner's consent
+Current CR: an `alerts` CLI subcommand; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -762,6 +762,47 @@ has demonstrated.**
 seeding the divergence in the *events*, so three tests skipped with "the seeded pair already
 agrees". A diagnostic showed the drift detector working correctly and the *test* at fault -- the
 skip message pointed at the implementation.
+
+### 2026-10-10 - CR-09 part 9: the cleared-condition defect, fixed
+
+Full evidence: `docs/evidence/cr09_alert_recurrence.txt`. **No xfails remain in the suite.**
+
+Last round I marked a test `xfail(strict=True)` rather than deleting it, saying the clear either
+did not run or did not take. This round found out which, and it was the first: **an early return.**
+
+```
+41:  self._history.append(result)
+42:  return result                      <-- consistent branch: NO _route call
+...
+95:  self._history.append(result)
+96:  self._route(result)               <-- drift branch: routes
+97:  return result
+```
+
+My original patch replaced the LAST `append(result); return result` in the method, which is the
+drift branch. The consistent branch returns earlier and never reached it, so `clear()` was never
+called and a condition that resolved and came back stayed suppressed **for ever**.
+
+`_route(result)` is now called on the recovery path too. **The test passes unchanged** -- it
+described the intended behaviour correctly all along and the implementation did not satisfy it.
+That is the argument for marking a known-bad test xfail rather than deleting it.
+
+**A mistake I made while fixing it, recorded because it is a repeat.** The edit's match included
+the line `self._state.consecutive_drifted += 1` and the replacement did not, so the fix DELETED
+the drift counter. I caught it by re-reading the file immediately after the edit and restored the
+line. `test_the_drift_counter_still_increments` now asserts it explicitly.
+
+**7 new tests, and the important one is behavioural rather than internal.** The round-19 test
+asserted on `router._last_delivered`; this one asserts what an operator experiences:
+
+    drift appears      -> 1 alert
+    drift resolves     -> (no alert, but recorded as recovered)
+    drift RETURNS      -> 2 alerts
+
+plus: repeats within one outage are still suppressed (the fix did not turn suppression off), a
+second outage pages once rather than once per cycle, the recovery is still recorded in history,
+and two structural tests that count `self._route(result)` occurrences so a future refactor
+reintroducing an early return fails here rather than in the field.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

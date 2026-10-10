@@ -1,0 +1,116 @@
+TigerQuant CR-09 evidence (part 9) - the cleared-condition defect, fixed
+Generated: see the git commit this file was added in
+
+Supersedes the UNRESOLVED DEFECT section of docs/evidence/cr09_alert_wiring.txt.
+No xfails remain in the suite.
+
+===========================================================================
+1. What was wrong: an early return
+===========================================================================
+Last round I marked a test xfail(strict=True) rather than deleting it, and recorded that "the
+clear either did not run or did not take". This round established which: THE CLEAR DID NOT RUN,
+because of an early return in `DriftMonitor.check()`.
+
+    41:  self._history.append(result)
+    42:  return result                      <-- consistent branch: NO _route call
+    ...
+    95:  self._history.append(result)
+    96:  self._route(result)                <-- drift branch: routes
+    97:  return result
+
+My original patch replaced the LAST `append(result)` / `return result` pair in the method, which is
+the drift branch. The consistent branch returns EARLIER and never reached it. So on a recovery,
+`_route` was never called, `clear()` never ran, and a condition that resolved and came back stayed
+suppressed for ever.
+
+WHY THIS IS THE DANGEROUS SHAPE OF BUG. The first alert DOES arrive. The system looks like it is
+working. The failure only shows up when a condition recurs after resolving -- which may be hours or
+days later, in the situation where the operator most needs to be told.
+
+===========================================================================
+2. The fix
+===========================================================================
+`_route(result)` is now called on the recovery path too:
+
+            self._history.append(result)
+            self._route(result)
+            return result
+
+And `_route` already handles the consistent case correctly -- it calls `router.clear(DRIFT_ALERT_KEY)`
+and returns None, so no alert is sent for a recovery while the suppression is still forgotten.
+
+**The test passes UNCHANGED.** It described the intended behaviour correctly all along and the
+implementation did not satisfy it. That is the entire argument for marking a known-bad test
+xfail(strict=True) rather than deleting or skipping it: the test was the specification, and it
+survived to prove the fix.
+
+===========================================================================
+3. A mistake I made while fixing it, recorded because it is a repeat
+===========================================================================
+The edit that added the `_route` call had a match that INCLUDED the following line
+
+    self._state.consecutive_drifted += 1
+
+and a replacement that did not. So the fix deleted the drift counter.
+
+I caught it by re-reading the file immediately after the edit and restored the line. This is the
+same truncating-edit failure mode I have hit before in this project, and the reason the rule is
+"read the file back after an edit that spans a boundary", not "trust the edit". A new test,
+`test_the_drift_counter_still_increments`, asserts it explicitly so a recurrence is caught rather
+than reasoned about.
+
+===========================================================================
+4. The tests, and which one actually matters
+===========================================================================
+7 new tests in tests/unit/test_alert_recurrence.py.
+
+The important one is BEHAVIOURAL, not internal. The round-19 test asserted on
+`router._last_delivered`; this one asserts what an operator experiences:
+
+    drift appears      -> 1 alert
+    drift resolves     -> no alert, but recorded as recovered
+    drift RETURNS      -> 2 alerts
+
+The rest:
+
+  * repeats within ONE outage are still suppressed -- the fix must not have turned suppression off
+    altogether;
+  * a second outage pages once, not once per cycle;
+  * the recovery is still recorded in history even though it sends no alert;
+  * two STRUCTURAL tests count the occurrences of `self._route(result)` in `check()` and assert the
+    consistent branch contains one, so a future refactor that reintroduces an early return fails
+    here rather than in the field.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+834 passed          (no xfails remain)
+
+$ python -m pytest tests/unit/test_alert_recurrence.py -q
+7 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 96 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. Suppression state is still in-process, so a RESTART re-delivers the first occurrence of every
+   open condition. That errs toward noise rather than silence -- the right direction -- but it is
+   not durable suppression, and a restart is also a moment when a recurring condition could be
+   re-paged that need not be.
+2. Still no `tigerquant alerts` CLI subcommand, so sinks cannot be configured from the command
+   line; the wiring is reachable from Python only.
+3. No sink is exercised against a real endpoint. `WebhookSink` is tested for its REFUSALS.
+4. `alert_from_drift` remains the only adapter: the watchdog and risk gateway do not yet produce
+   Alerts, so routing covers one source.
+5. The structural tests assert on source text via `inspect.getsource`. That is a deliberate choice
+   for a control that is a control-flow property, but it would not survive aggressive minification
+   or metaprogramming -- neither of which this project does.

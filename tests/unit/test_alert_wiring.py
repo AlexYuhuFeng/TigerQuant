@@ -138,23 +138,16 @@ class TestRoutingHappensInsideCheck:
             monitor.check(events, at=AT)
         assert len(sink.alerts) <= 1
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "UNRESOLVED. After the condition clears, the suppression entry is still present in "
-            "router._last_delivered, so the clear either did not run or did not take. The "
-            "behaviour it is meant to protect -- a recurring condition alerting again -- is "
-            "therefore NOT verified. Marked xfail rather than deleted so the gap stays visible; "
-            "see docs/evidence/cr09_alert_wiring.txt."
-        ),
-    )
     def test_a_cleared_condition_forgets_its_suppression(self) -> None:
         """Without the clear, a problem returning after an hour stays suppressed for ever.
 
-        NOTE: this test FAILS and is expected to. What it asserts is the intended behaviour and
-        the assertion is correct; the implementation does not yet satisfy it, and I ran out of
-        investigation budget to isolate why. It is xfail(strict=True) so that fixing the code
-        turns it green and a strict run flags the change.
+        This was xfail(strict=True) for one round. The cause was an EARLY RETURN: the consistent
+        branch of check() appended its result and returned WITHOUT calling _route, so
+        clear() never ran and a condition that resolved and came back stayed suppressed for
+        ever -- delivered once, then never again. _route is now called on the recovery path too.
+
+        The test is unchanged from when it was failing. That is the point: it described the
+        intended behaviour correctly and the implementation did not satisfy it.
         """
         sink = MemorySink()
         events, repo = diverging_pair()

@@ -211,8 +211,13 @@ class DriftMonitor:
                 detail=report.summary(),
             )
             self._history.append(result)
+            # Route on the RECOVERY too, not only on the drift. This used to return here without
+            # calling _route, so `clear()` never ran and a condition that resolved and came back
+            # stayed suppressed for ever -- delivered once, then never again. That is precisely
+            # the failure `clear()` exists to prevent, and it was invisible until a test asserted
+            # it and was marked xfail rather than deleted.
+            self._route(result)
             return result
-
         self._state.consecutive_drifted += 1
         occurrences = self._state.consecutive_drifted
         was_drifted = self._state.was_drifted
