@@ -1,0 +1,127 @@
+TigerQuant CR-04 evidence - NautilusTrader adapter and execution parity
+Generated: see the git commit this file was added in
+
+Implementation status: PARTIAL. The engine-agnostic half is done and tested. The half that
+needs the engine wheel installed is NOT done, and this file says which is which.
+
+===========================================================================
+1. Gate: "Same deterministic strategy events in backtest and paper; adapter parity tests"
+===========================================================================
+  [x] mode translation table, explicit and tested      adapters/nautilus/modes.py
+  [x] the LIVE refusal, as a control rather than a gap
+  [x] PAPER will not default its submission target     in either direction
+  [x] parity harness with classified divergences       execution/parity.py
+  [x] parity harness proves a broker equals itself
+  [x] structural vs labelled divergence separation     tested both ways
+  [ ] NautilusTrader ExecutionClient / DataClient / InstrumentProvider   NOT DONE
+  [ ] interface-shape compatibility test against the installed wheel      NOT DONE
+
+The two unchecked lines need `nautilus_trader==1.231.0` installed. See section 4.
+
+===========================================================================
+2. Mode translation: the row that matters
+===========================================================================
+Verified fact (ADR-0010, from the pinned tag): NautilusTrader's Environment is
+{BACKTEST, SANDBOX, LIVE}. There is NO PAPER environment.
+
+  tq BACKTEST               -> engine BACKTEST   target NONE    SIMULATED
+  tq SHADOW                 -> engine SANDBOX    target NONE    SIMULATED
+  tq PAPER + target NONE    -> engine SANDBOX    target NONE    SIMULATED
+  tq PAPER + target BROKER  -> engine LIVE       target BROKER  PAPER_VERIFIED
+  tq PAPER + no target      -> REFUSED
+  tq LIVE                   -> REFUSED, always
+
+PAPER -> LIVE is the counter-intuitive row and the one that is easy to get wrong. A Tiger
+paper account is reached over the ordinary production gateway with a real API and a real order
+state machine, so the engine must be LIVE to connect to it. What makes it *paper* is the
+ACCOUNT IDENTITY, verified from the broker's own response by TigerAccountGuard — not the
+engine environment. Mapping PAPER to SANDBOX because both sound like "not real money" would
+label a real venue connection as a local simulation, which is exactly the false labelling
+AGENTS.md invariant 11 forbids.
+
+The result is reported as PAPER_VERIFIED and never LIVE_VERIFIED, and there is a test asserting
+that no row of the table ever reports LIVE_VERIFIED.
+
+Two refusals, both deliberate:
+
+* **PAPER without a submission target is refused.** Defaulting to BROKER would let an
+  unconfigured run reach a real venue; defaulting to NONE would silently turn a paper run into
+  a simulation. Neither default is acceptable, so the caller must say which it means.
+* **LIVE is refused outright.** This is the control, not a missing implementation. Translating
+  it to Environment.LIVE would arm the one path that must stay off without a separate human
+  authorization. The error message says so, and the test asserts the message.
+
+===========================================================================
+3. Parity harness: contract violations are not venue characteristics
+===========================================================================
+execution/parity.py drives two BrokerProtocol implementations through an IDENTICAL ordered
+command list and compares the traces. The comparison is layered, because a harness that
+demanded byte equality would be useless and one that smoothed differences away would be worse:
+
+  structural  a different step count, state, fill count, or order-id presence.
+              These are FAILURES: the two paths are not implementing the same contract, so a
+              strategy's decisions would mean different things in each.
+  labelled    a different fill price, commission or quantity. EXPECTED between a simulator and
+              a real venue, and reported with the field and both values rather than hidden.
+  timing      the same state with a different message. Reported separately.
+
+The verdict is named `comparable`, deliberately not `equal`: a comparable pair still has
+labelled differences, and the summary says in as many words that comparable does NOT mean
+interchangeable.
+
+A bug this found: the QUERY path left `average_fill_price` as None, so two venues filling the
+same quantity at different prices were reported as "identical" — the exact smoothing the module
+promises not to do. The query branch now computes the average from the returned fills. The test
+that compares two scripted prices is what caught it, which is a good argument for writing the
+test that asserts the property rather than one that exercises the code.
+
+===========================================================================
+4. Why the engine half is not done
+===========================================================================
+`uv pip install "nautilus_trader==1.231.0"` has now been started three times in this
+environment and has not completed. It is a large compiled wheel with a heavy dependency tree,
+and the download has not finished within the available window on this network. This is recorded
+as NOT EXECUTED, not as passing.
+
+What this does and does not block:
+  * CR-04's engine-agnostic half is complete and tested (20 tests).
+  * Nothing else in the project depends on it. ADR-0010 §Consequences says explicitly that the
+    internal contracts are engine-agnostic on purpose, so CR-01/02/03/05/06/07 stay testable
+    without the engine — which is exactly what happened.
+  * The remaining work is mechanical once the wheel is present: implement InstrumentProvider,
+    DataClient and ExecutionClient against the pinned tag's source tree, then write the
+    interface-shape test that fails loudly on a wheel bump.
+
+The adapter must be written against the PINNED TAG's source, not the published documentation.
+Verified during CR-00: https://nautilustrader.io/docs/latest/ documents the v2.0.0rcN Rust-core
+line whose adapter interface differs from 1.231.0, there is no versioned /docs/1.231.0/ path,
+and even docs/developer_guide/adapters.md inside the v1.231.0 tag is already v2-oriented.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+539 passed
+
+$ python -m pytest tests/unit/test_nautilus_modes_and_parity.py -q
+20 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 84 source files
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. NautilusTrader is not installed, so no adapter class has been written and no interface-shape
+   compatibility test exists. A wheel bump therefore cannot yet fail loudly, which ADR-0010
+   requires it to.
+2. The parity harness is unit-tested against scripted brokers, not against a real Tiger paper
+   session, because that needs a write-scoped grant (CR-03's blocker). The two blockers are
+   therefore linked: full CR-04 parity evidence needs CR-03's grant AND the engine wheel.
+3. Parity is defined over the command list the harness is given. There is no committed shared
+   scenario corpus yet; ADR-0010 §6 calls for one.
+4. Backtest/paper parity of the STRATEGY loop (not just the execution client) is not tested.
+   That needs the engine to run a node.

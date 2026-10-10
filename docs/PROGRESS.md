@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-04 (NautilusTrader adapter), then CR-09 scheduling and CR-08
+Current CR: CR-04's engine half (blocked on the wheel), CR-09 scheduling, CR-08
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -271,6 +271,40 @@ been called, because that needs an API key this project does not hold.
    case is a provider that lets an exception escape `propose()`. Both are now tested
    separately, because they look identical from a distance and mean opposite things.
 
+### 2026-10-10 — CR-04 partial: mode translation and execution parity
+
+Full evidence: `docs/evidence/cr04_engine_adapter.txt`.
+
+**The engine-agnostic half is done; the half that needs the engine wheel is not.** That split is
+not an excuse — ADR-0010 says explicitly that the internal contracts are engine-agnostic on
+purpose so the other CRs stay testable without a large compiled wheel, and this is that decision
+paying off.
+
+- **Mode translation** (`adapters/nautilus/modes.py`). NautilusTrader's `Environment` is
+  `{BACKTEST, SANDBOX, LIVE}` — there is no `PAPER`. The counter-intuitive row is
+  **`PAPER + BROKER → engine LIVE`**: a Tiger paper account is reached over the ordinary
+  production gateway with a real API and a real order state machine, so the engine must be LIVE
+  to connect. What makes it *paper* is the **account identity**, verified from the broker's own
+  response — not the engine environment. Mapping it to `SANDBOX` because both sound like "not
+  real money" would label a real venue connection as a local simulation.
+- Two refusals, both deliberate. **`PAPER` without a submission target is refused**, because
+  defaulting to `BROKER` would let an unconfigured run reach a real venue and defaulting to
+  `NONE` would silently make a paper run a simulation. And **`LIVE` is refused outright** — that
+  refusal *is* the control, not a gap.
+- **Parity harness** (`execution/parity.py`) drives two brokers through an identical command
+  list and classifies every divergence: **structural** (a different state or fill count — a
+  contract violation, and a failure), **labelled** (a different price or commission — expected
+  between venues, and reported rather than hidden), or **timing**. The verdict is named
+  `comparable`, deliberately not `equal`.
+
+**A bug the harness found in itself:** its QUERY path left `average_fill_price` as `None`, so
+two venues filling the same quantity at different prices were reported as *identical* — the
+exact smoothing the module promises not to do. The test comparing two scripted prices caught it.
+
+**Blocked:** `uv pip install "nautilus_trader==1.231.0"` has now been started three times and has
+not completed on this network. The adapter classes and the interface-shape compatibility test
+need it. Recorded as **not executed**, never as passing.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
@@ -295,6 +329,11 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
 
 ## Known limitations (honest list)
 
+- **CR-04 is partial.** The mode translation table and the execution parity harness are done and
+  tested. The NautilusTrader `InstrumentProvider` / `DataClient` / `ExecutionClient` classes and
+  the interface-shape compatibility test are **not written**, because
+  `nautilus_trader==1.231.0` has not installed on this network across three attempts. A wheel
+  bump therefore cannot yet fail loudly, which ADR-0010 requires it to.
 - **CR-03 is partial.** The guarded write adapter exists and is tested, but **no order has ever
   been submitted**, so its status is `SIMULATED`. The remaining acceptance item is a real paper
   round trip, which needs a write-scoped OAuth grant — an owner decision, not a coding task.
@@ -337,5 +376,5 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
    the projection tables, then schedule the drift check and alarm on it.
 2. **CR-03's last acceptance item is blocked on the owner**, not on code: a real paper round trip
    needs a write-scoped OAuth grant (`api.trade:write`).
-3. CR-04 (NautilusTrader adapter) is buildable offline.
+3. CR-04's engine half needs the wheel to install; the mode table and parity harness are done.
 4. CR-05's remaining gap: news/filing ingestion connectors.
