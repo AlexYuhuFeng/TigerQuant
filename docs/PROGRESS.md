@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-05 ingestion connectors; CR-09 needs CR-03's grant for a long run
+Current CR: CR-04 strategy-loop parity; CR-09 needs CR-03's grant for a long run
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -437,6 +437,41 @@ The exit-code table is a contract, so it is checked: `test_runbooks.py` verifies
 the runbooks name actually exists (read from the argparse parser, not a hardcoded list), that the
 drift runbook's quoted threshold and cadence match the configured policy, and that the cancel
 exemption RB-04 claims is true of `RiskState`.
+
+### 2026-10-10 — CR-05 complete: evidence ingestion connectors
+
+Full evidence: `docs/evidence/cr05_connectors.txt`. This closes the last gap CR-05 had named —
+nothing actually *fetched* anything.
+
+Three separations carry the safety of the module:
+
+1. **A connector produces documents, not facts.** Assigning the fact id, hashing content and
+   stamping availability happen in `IngestionPipeline`, in one place. A connector therefore
+   cannot mint a fact id, backdate availability, or mark its own content clean.
+2. **`available_at` is stamped at ingestion, never taken from the source.** The source's
+   timestamp says when *they claim* they published; what matters for lookahead is when *we*
+   could first have acted on it.
+3. **A connector that cannot be verified refuses to run.** Entitlements are unverified here, so
+   `HttpNewsConnector` raises and says what would be needed — and with an entitlement it *still*
+   refuses, because a fetcher that has never run against a real endpoint is untested code
+   wearing a working label.
+
+Live deterministic run: 2 documents admitted, 1 **injection-flagged**, facts stored as
+`ATTRIBUTED_CLAIM` — not `OBSERVED`, because a news article is somebody's assertion and this
+system did not observe it. A second pass admitted 0 and found 2 duplicates.
+
+**A lookahead guard in the `Fact` model that this tripped, correctly.** A source whose clock ran
+a minute fast produced a validation error, because `Fact` refuses `event_time` later than
+`available_at` — which is right, since a fact whose event precedes our knowledge of it *is*
+lookahead. The fix belongs in ingestion, not the model: `event_time` is now `min(published, now)`
+while `published_at` keeps the source's claim.
+
+**A claim I withdrew rather than made true.** The first version stripped text before hashing and
+claimed a reformatted refetch would be idempotent. It isn't: leading whitespace on a body becomes
+*interior* whitespace once joined with the title. Folding interior whitespace would have made the
+claim true at the cost of conflating documents that genuinely differ — the wrong trade for an
+evidence store. The real behaviour is now asserted, which exposes a real gap: **revision chaining
+is not implemented**, so a feed that reformats its articles would accumulate near-duplicates.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

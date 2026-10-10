@@ -29,7 +29,7 @@ Last updated: 2026-10-10.
 | CR-02 | **COMPLETE** | `docs/evidence/cr02_authorization.txt`, `docs/evidence/cr02_reconciliation.txt` | Gate met: account type verified via the API, cash/positions/orders read and reconciled, and no submit path exists. `PAPER_VERIFIED`. |
 | CR-03 | **PARTIAL — BLOCKED on a write-scoped grant** | `docs/evidence/cr03_execution_adapter.txt` | The guarded write adapter and all four safety gates exist and are tested against a fake SDK, including timeout→UNKNOWN with no retry, partial fills, and the `order.account` hazard. **No order has ever been submitted**, because the credential is deliberately read-only. Status is `SIMULATED`, not `PAPER_VERIFIED`. A write-scoped grant is an owner decision, not a coding task. |
 | CR-04 | **PARTIAL** | `docs/evidence/cr04_engine_adapter.txt` | Engine installed and verified. Mode translation, the interface-shape contract, the guarded `ExecutionClient` (constructed and gated against the real wheel) and the parity harness are all done and tested. Outstanding: strategy-loop parity across backtest and paper, and parity against a real Tiger paper session (needs CR-03's grant). |
-| CR-05 | **SUBSTANTIALLY DELIVERED** | `docs/evidence/cr05_database.txt`, `docs/adr/ADR-0013-database-architecture.md` | Calendar, source registry, per-category staleness, untrusted-text sandboxing, durable fact log, vintage-correct revisions, derivation lineage, and the containerised PostgreSQL layer are implemented and tested. Not marked complete: news/filing ingestion connectors do not exist yet. |
+| CR-05 | **SUBSTANTIALLY DELIVERED** | `docs/evidence/cr05_database.txt`, `docs/evidence/cr05_connectors.txt`, `docs/adr/ADR-0013-database-architecture.md` | Calendar, source registry, per-category staleness, untrusted-text sandboxing, durable fact log, vintage-correct revisions, derivation lineage, the containerised PostgreSQL layer AND ingestion connectors are implemented and tested. Not marked complete because: no real feed has been contacted (entitlements are unverified, so the HTTP connector refuses by design), revision chaining on changed content is not implemented, and there is no filing/calendar connector. |
 | CR-06 | **PARTIAL** | `docs/evidence/cr06_model_interface.txt` | Provider-neutral path, versioned prompt contract, failure handling (every failure abstains) and the benchmark harness are done and tested. No provider has been called: that needs an API key. Status is `SIMULATED`. |
 | CR-07 | **COMPLETE** | `docs/evidence/cr07_risk_controls.txt` | Session limits (turnover, daily loss, drawdown, rolling order rate), the risk-metrics accumulator, and an independent watchdog whose only power is to stop. Includes the privilege-bypass suite and the "no alternative order path" source scan. |
 | CR-08 | **COMPLETE** | `docs/evidence/cr08_dashboard.txt` | Lineage from the journal (decision → evidence → risk → order states → fill → ledger), text/JSON/CSV exports, and a dashboard that is read-only and loopback-only **by construction**. Isolation is stated in the report facts, in an HTTP header on every response, and on the page itself. |
@@ -40,10 +40,10 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **660 passed** |
+| `pytest -q` (PostgreSQL running) | **682 passed** |
 | `pytest -q -m "not requires_db"` | **640 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
-| `mypy` (strict) | Success, 91 source files |
+| `mypy` (strict) | Success, 92 source files |
 | `ruff check` / `format --check` | Clean |
 | `tools/tiger_reconcile.py` | `RECONCILED=true` against the live Tiger paper account |
 | `tigerquant drift` | Detects real drift (exit 1) and reports consistent after projection (exit 0) |

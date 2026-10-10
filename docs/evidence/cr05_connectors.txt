@@ -1,0 +1,128 @@
+TigerQuant CR-05 evidence (part 2) - evidence ingestion connectors
+Generated: see the git commit this file was added in
+
+This closes the last gap CR-05 had named: nothing actually *fetched* anything.
+
+===========================================================================
+1. The three separations that carry the safety of this module
+===========================================================================
+A. A CONNECTOR PRODUCES DOCUMENTS, NOT FACTS.
+   RawDocument is untrusted text plus provenance. Turning it into a Fact -- assigning the
+   fact id, hashing content, stamping availability -- happens in IngestionPipeline, in one
+   place. The connector has no store, no registry and no clock, so it CANNOT mint a fact id,
+   backdate availability, or mark its own content clean. Tested by asserting the connector's
+   public surface contains none of those.
+
+B. available_at IS STAMPED AT INGESTION, NEVER TAKEN FROM THE SOURCE.
+   The source's own timestamp says when they claim they published it. What matters for
+   lookahead is when WE could first have acted on it. Verified:
+       published_at = 2026-03-02T14:30:00+00:00   (the source's claim)
+       available_at = 2026-03-02T14:40:00+00:00   (the injected clock at ingestion)
+   Stamping available_at from published_at would let a feed backdate its own content into the
+   past, which is exactly the lookahead this project is built to prevent.
+
+C. A CONNECTOR THAT CANNOT BE VERIFIED REFUSES TO RUN.
+   Market-data entitlements are UNVERIFIED in this project. HttpNewsConnector raises rather
+   than fetching, and says what would be needed:
+       "refusing to fetch 'https://...': no market-data entitlement has been confirmed for
+        this feed. Entitlements are a commercial fact, not a code fact ... Set
+        entitlement_reference to the written confirmation before this connector will run."
+   With an entitlement it STILL refuses, because there is no fetcher: a fetcher that has never
+   run against a real endpoint is untested code wearing a working label (AGENTS.md inv. 11).
+
+===========================================================================
+2. Live end-to-end run, offline and deterministic
+===========================================================================
+$ python tools/_probe_connectors.py     (deleted after use; reproduced by the test suite)
+
+registered sources: ('derived:local', 'fixture:synthetic', 'fixture:test', 'wire:other')
+
+fixture-news: fetched 2, admitted 2, duplicates 0, INJECTION-FLAGGED 1
+
+facts stored:
+  fact:7a11695b574aa5377 kind=ATTRIBUTED_CLAIM cat=NEWS_WIRE flags=()
+      available_at=2026-03-02T14:40:00+00:00
+  fact:926124bdf4edfb45b kind=ATTRIBUTED_CLAIM cat=NEWS_WIRE
+      flags=('instruction_override', 'system_channel') available_at=2026-03-02T14:40:00+00:00
+
+=== idempotence: ingest again ===
+fixture-news: fetched 2, admitted 0, duplicates 2, INJECTION-FLAGGED 1
+
+=== the HTTP connector refuses ===
+refused: ConfigurationError: refusing to fetch 'https://example.invalid/news': no market-data
+entitlement has been confirmed for this feed.
+
+Note the KIND: ATTRIBUTED_CLAIM, not OBSERVED. A news article is somebody's assertion; this
+system did not observe it and must not label it as though it had. That distinction is the whole
+point of an evidence-grounded trader, and the FactKind enum already had the right member.
+
+===========================================================================
+3. What the pipeline enforces, and what it refuses
+===========================================================================
+  [x] source must be REGISTERED            -> provenance, reliability and licence scope are
+                                              declared, not asserted by the connector
+  [x] connector may only return ITS OWN source's documents  -> blocks smuggling
+  [x] published_at in the future is REJECTED (beyond 5 min of tolerated skew)
+  [x] empty documents are rejected
+  [x] injection patterns are FLAGGED and travel with the fact, not silently stripped
+  [x] ingestion is idempotent for identical bytes
+  [x] the content hash covers the cleaned text, and the external id is included so two
+      different documents sharing a body stay distinct
+
+===========================================================================
+4. A lookahead guard in the Fact model that this pipeline tripped, correctly
+===========================================================================
+A source whose clock ran one minute fast produced a pydantic ValidationError: the Fact model
+refuses a fact whose event_time is later than its available_at. That is CORRECT -- a fact whose
+event precedes our knowledge of it IS lookahead -- and the fix belongs in the ingestion path,
+not in the model: event_time is now min(published, now), so it can never be later than the
+moment we learned of it, while published_at keeps the source's own claim and
+attributes["published_ahead_of_ingestion"] records that the two differed. Tolerance is five
+minutes, because a minute of skew between us and a publisher is normal rather than an attack.
+
+===========================================================================
+5. A claim I had to withdraw rather than make true
+===========================================================================
+The first version stripped the cleaned text before hashing and claimed that made a reformatted
+refetch idempotent. It does not. Leading whitespace on a BODY becomes INTERIOR whitespace once
+the title and body are joined, so stripping the ends changes nothing. Folding interior
+whitespace would have made the claim true at the cost of conflating documents that genuinely
+differ -- the wrong trade for an evidence store.
+
+So the claim is withdrawn and the real behaviour asserted instead: an identical refetch is a
+duplicate, and a refetch whose content changed produces a DISTINCT fact. That exposes a real
+gap rather than hiding one, and it is recorded below.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+682 passed
+
+$ python -m pytest tests/unit/test_evidence_connectors.py -q
+22 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 92 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. NO REAL FEED HAS BEEN CONTACTED. There is no fetcher, because there is no verified
+   entitlement. Every test runs against an in-code fixture connector. The fixture connector is
+   labelled SYNTHETIC where it is used and is not a news feed.
+2. REVISION CHAINING IS NOT IMPLEMENTED. A feed that reformats its articles produces distinct
+   facts rather than a `supersedes` chain, so it would accumulate near-duplicates. The Fact
+   schema anticipates this (`supersedes` exists) and the field is left None; wiring it is the
+   correct next step and is not done.
+3. No scheduling. Ingestion runs when a caller invokes it; there is no poller, no backoff and
+   no rate limiting, and a real feed would need all three.
+4. Only news-shaped documents. There is no connector for filings, earnings calendars or
+   corporate actions, though SourceKind already has OFFICIAL_FILING.
+5. The fixture connector filters by the fetch window, so a future-dated document is dropped
+   by the window before the pipeline's own future check sees it. The check is still correct
+   and is tested directly by driving the pipeline with a widened window; the ordering is
+   recorded here because it surprised me.
