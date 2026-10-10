@@ -688,6 +688,10 @@ _OPERATIONAL_CLOCK_MODULES = frozenset(
     {
         # Timestamps a verification marker: "when did we last check this credential".
         "settings.py",
+        # An OPERATIONAL loop. Its whole job is to measure real elapsed time: a heartbeat is
+        # meaningless without a wall clock, and an interval that came from a simulated clock
+        # would not be an interval. Nothing here is replayed or journaled.
+        "supervisor.py",
         # A CLI command a HUMAN runs on demand. "Now" is the correct instant for a synthetic
         # probe and for a reconciliation the operator asked for at this moment; neither is
         # replayed, and neither contributes a journaled event. This module was caught by the

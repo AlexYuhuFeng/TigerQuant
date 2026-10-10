@@ -1,0 +1,132 @@
+TigerQuant CR-09 evidence (part 11) - the supervised observation loop
+Generated: see the git commit this file was added in
+
+Gate item closed: "a supervised long-running process". New module `ops/supervisor.py`, 35 tests.
+
+===========================================================================
+1. Three ways an unsupervised loop fails badly, and what this does about each
+===========================================================================
+A. A HUNG PROCESS LOOKS EXACTLY LIKE A HEALTHY ONE.
+   A dead process is easy: the OS notices. A process that is ALIVE BUT STUCK -- blocked on a
+   database that stopped answering, or spinning without progressing -- looks identical to a
+   working one from the outside. Nothing in a liveness check distinguishes them.
+
+   The supervisor writes a heartbeat BEFORE and AFTER every cycle, and the heartbeat carries the
+   cycle index and the phase. Writing it twice is the design: a single write at the end cannot
+   tell "working" from "stuck in cycle 41", because a stuck process has simply not written yet.
+   With a start-of-cycle write, a watchdog can see the INDEX STOP ADVANCING, which is the actual
+   failure it needs to detect.
+
+       {"phase": "idle", "cycle": 3, "started_at": "...", "written_at": "...",
+        "last_cycle_ok": true, "interval_seconds": 30.0}
+
+   `heartbeat_age_seconds(path)` returns the age, or None when there is no heartbeat. A missing
+   or corrupt heartbeat reads as None rather than raising: a watchdog asking "is it alive" must
+   not crash on the half-written file it will inevitably find mid-write.
+
+B. LOOPING FOR EVER ON A BROKEN SYSTEM HIDES THE BREAKAGE.
+   After `max_consecutive_failures` cycles that raise, the supervisor HALTS. Retrying
+   indefinitely produces a process that is up, is logging, and is reconciling nothing -- the state
+   most likely to be mistaken for health. The halt is recorded as a CRITICAL alert through the
+   router, so a stopped supervisor is not silent.
+
+C. IT NEVER REPAIRS ANYTHING. It observes. The drift monitor already refuses to repair
+   divergence, because a divergence means we do not know which record is wrong. The supervisor
+   inherits that stance: its only actions are to check, to record and to alert.
+
+===========================================================================
+2. IT DOES NOT TRADE, STRUCTURALLY
+===========================================================================
+This is an observation loop with no order path, no approval registry and no broker write
+credential. The cycle is an INJECTED CALLABLE rather than an imported dependency, so the class
+cannot reach a venue even if someone wanted it to -- the boundary is a fact about the type
+signature, not a promise in a docstring.
+
+Three tests assert it: the module source contains no `submit_order`/`place_order`/`OrderIntent`,
+it imports nothing from `tigerquant.adapters`, and its docstring states the boundary. A
+long-running process is exactly where an accidental trading loop would be most damaging and least
+visible, which is why the check is structural.
+
+===========================================================================
+3. A CYCLE THAT FINDS DRIFT IS A SUCCESS
+===========================================================================
+`drift_detected` and `ok` are SEPARATE fields. A cycle that ran correctly and found drift is a
+SUCCESS that reports bad news; counting it as a failure would halt the supervisor for doing its
+job, which is exactly backwards. Tested directly: four drift-finding cycles produce
+`ok_cycles=4, failed_cycles=0, halted=False`.
+
+And a transient failure does not halt: `max_consecutive_failures` counts CONSECUTIVE failures and
+resets on any success, so two failures, a success, then two more never trip a threshold of three.
+
+===========================================================================
+4. Live behaviour, observed
+===========================================================================
+    $ supervisor with a cycle that always raises, max_consecutive_failures=3
+    supervisor: 3 cycle(s), 0 ok, 3 failed; HALTED: max_consecutive_failures
+    cycles: 3 | halted: True | every failure attributed: True | heartbeat readable: True
+
+    $ a cycle that always finds drift, max_cycles=4
+    supervisor: 4 cycle(s), 4 ok, 0 failed; worst severity WARNING; stopped normally
+
+    $ a cycle that fails once then succeeds, max_cycles=5
+    cycles 5 | failed 1 | halted False
+
+Halting means stopping, not reporting after one more: a counting test confirms exactly three
+cycle invocations for a threshold of three.
+
+===========================================================================
+5. Two defects the tests caught in my own code
+===========================================================================
+A. THE HALT REASON WAS DISCARDED. `run()` built a detailed message naming the last error, then
+   passed only the CODE (`HALTED_AT`) to the report. So whoever found the process stopped learned
+   THAT it halted but not WHAT broke it -- and the error is the only actionable part. It now
+   carries both: the code first so it stays machine-readable, the detail after.
+
+       max_consecutive_failures: 2 consecutive cycle(s) failed; last error:
+       RuntimeError: database stopped answering. Halting rather than retrying: ...
+
+B. A FLOAT IN A DIGEST. `CycleOutcome.as_record()` emitted `duration_seconds` as a float, and
+   `digest_of` refused it -- correctly, since this project does not canonicalise floats because
+   they are not reproducible across platforms. It is now a string. The canonicaliser caught this
+   rather than a downstream comparison failing mysteriously, which is the whole reason it refuses
+   floats instead of coercing them.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+894 passed
+
+$ python -m pytest tests/unit/test_supervisor.py -q
+35 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 98 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing        (supervisor.py is on the operational wall-clock allow-list,
+                                  with the reason recorded: an operational loop's whole job is
+                                  measuring real elapsed time)
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. NOT WIRED TO A CLI COMMAND. The class is a tested library; there is no `tigerquant supervise`
+   subcommand, so it cannot yet be started from the command line as a long-running process. State
+   plainly: the loop exists and is tested, the entry point does not.
+2. WALL-CLOCK ONLY, and deliberately so. It measures real elapsed time with no injected clock, so
+   it cannot be tested for cadence accuracy without real sleeping. The interval logic is
+   therefore tested for ORDERING and STOP behaviour rather than for timing precision.
+3. NO HANG DETECTION. The heartbeat is written so that an EXTERNAL watchdog can detect a stuck
+   process, but nothing here reads it back and halts itself. A cycle that blocks for ever blocks
+   the supervisor for ever; only an outside observer notices.
+4. THE SLEEP IS A POLLING LOOP at 0.5s slices, so a stop request is honoured within half a
+   second rather than immediately. Good enough for a 30s cadence; it would not be for a
+   millisecond one.
+5. No signal handling. `stop()` is available programmatically; Ctrl-C is not caught, so the
+   process exits without writing a final heartbeat.
+6. Not exercised over a real long duration. Everything here is measured in seconds of wall time
+   in a test, not hours.

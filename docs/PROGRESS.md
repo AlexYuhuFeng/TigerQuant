@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: a supervised long-running process; CR-03 awaits the owner's consent
+Current CR: a CLI entry point for the supervisor; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -834,6 +834,48 @@ call would have been invisible.
 
 `verify` defaults its probe to `out/alerts_verify.jsonl`, not the real alert log, so a probe never
 pollutes what an operator reads during an incident.
+
+### 2026-10-10 - CR-09 part 11: the supervised observation loop
+
+Full evidence: `docs/evidence/cr09_supervisor.txt`. New module `ops/supervisor.py`, 35 tests.
+
+**Three ways an unsupervised loop fails badly, and what this does about each.**
+
+**A hung process looks exactly like a healthy one.** A dead process is easy -- the OS notices. A
+process that is ALIVE BUT STUCK looks identical to a working one. So the supervisor writes a
+heartbeat **before and after** every cycle, carrying the cycle index and phase. Writing it twice is
+the design: a single write at the end cannot tell "working" from "stuck in cycle 41", because a
+stuck process has simply not written yet. With a start-of-cycle write, a watchdog sees the **index
+stop advancing** -- the actual failure it needs to detect.
+
+**Looping for ever on a broken system hides the breakage.** After N consecutive failures it
+**halts**, and records the halt as a CRITICAL alert so a stopped supervisor is not silent.
+Retrying indefinitely produces a process that is up, is logging, and is reconciling nothing -- the
+state most easily mistaken for health.
+
+**It never repairs anything**, inheriting the drift monitor's stance: a divergence means we do not
+know which record is wrong, so overwriting either destroys the evidence needed to find out.
+
+**It does not trade, structurally.** The cycle is an INJECTED CALLABLE, not an imported
+dependency, so the class cannot reach a venue even if someone wanted it to. Three tests assert the
+module contains no `submit_order`/`place_order`/`OrderIntent`, imports nothing from
+`tigerquant.adapters`, and says so in its docstring. A long-running process is exactly where an
+accidental trading loop would be most damaging and least visible.
+
+**A cycle that FINDS drift is a success.** `drift_detected` and `ok` are separate fields --
+counting a check that ran correctly as a failure would halt the supervisor for doing its job,
+which is backwards. And a transient failure does not halt: the counter is CONSECUTIVE and resets on
+any success.
+
+**Two defects the tests caught in my own code.** The halt reason was DISCARDED -- `run()` built a
+detailed message naming the last error, then passed only the code, so whoever found the process
+stopped learned *that* it halted but not *what* broke it. It now carries both. And `as_record()`
+emitted a float, which `digest_of` refused **correctly** -- this project does not canonicalise
+floats because they are not reproducible across platforms. It is a string now.
+
+    max_consecutive_failures: 2 consecutive cycle(s) failed; last error:
+    RuntimeError: database stopped answering. Halting rather than retrying: a loop that keeps
+    running against a broken system is the state most easily mistaken for health.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
