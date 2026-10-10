@@ -1,0 +1,27 @@
+{
+  "bars": 390,
+  "bars_per_second": "53.1",
+  "decisions": 390,
+  "deterministic": true,
+  "events": 2158,
+  "final_cash": "95202.36",
+  "final_equity": "100563.64",
+  "invariants_checked": [
+    "journal hash chain verifies after the whole run",
+    "journal and database agree after projecting the whole run",
+    "the run is reproducible: two passes produce the same journal digest",
+    "every fill traces back to a decision",
+    "the risk limits were exercised (a limit that never fires is not evidence)",
+    "journal and database agree after projecting the whole run",
+    "every fill traces back to a decision"
+  ],
+  "journal_digest": "sha256:ef6e4ed0bffd03fa426584c1f0265307b7af4cb2a3534c02faf88a126904618b",
+  "ok": true,
+  "orders_filled": 1,
+  "orders_submitted": 1,
+  "risk_denials": 197,
+  "sessions": 1,
+  "simulated_span_hours": "6.50",
+  "violations": [],
+  "wall_seconds": "7.3485"
+}

@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-05 gap closed; CR-03 awaits the owner's consent page
+Current CR: fix the O(n^2) replay scaling; CR-03 still awaits the owner's consent page
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -571,6 +571,43 @@ a replay at an earlier instant sees the revision that actually existed then.
 asserting `all(fact.supersedes is None)`; it now asserts the chain, with the old reasoning kept
 in the docstring. Five more cover the byte-identical case, a third revision, a different
 document, the reported count, and the restart.
+
+### 2026-10-10 — CR-09 part 4: long-duration stability harness
+
+Full evidence: `docs/evidence/cr09_long_run.txt`. One full US equity session ran clean:
+
+```
+long-run [STABLE]; 1 simulated session(s), 390 bars; covering 6.50h of MARKET time in 7.35s of
+wall time (53.1 bars/s); 2158 event(s), 390 decision(s), 1 submitted, 1 filled, 197 risk denial(s)
+  [x] journal hash chain verifies after the whole run
+  [x] journal and database agree after projecting the whole run
+  [x] the run is reproducible: two passes produce the same journal digest
+  [x] every fill traces back to a decision
+  [x] the risk limits were exercised (a limit that never fires is not evidence)
+violations: (none)
+```
+
+**Two clocks, never merged.** `simulated_span_hours` is market time; `wall_seconds` is machine
+time. There is deliberately no combined "duration" field, because that is the same misreading this
+project already had to correct for latency.
+
+**Two things I had to fix in my own work.** The report *claimed* two invariants it never checked —
+the list was written before the checks, which is the worst version of the mistake, because the
+report then reads as evidence for something nobody verified. Both are now actually run and can
+fail. And the harness first sat in `ops/`, which sits *below* the pipeline it orchestrates; this
+project's own boundary test caught the upward import. That is the second time that test has caught
+a file placed by convenience rather than by layer.
+
+**A real performance finding, surfaced by the harness doing its job.** The first five-session run
+did not finish in ten minutes. Measuring: **100 bars → 0.54s, 200 → 1.76s (3.3×), 400 → 8.20s
+(4.7×)**. Doubling the bars multiplies the time by ~4 where linear work would double it. The
+replay path is **O(n²) in bars**, and that is why the multi-day run did not complete. Recorded,
+not worked around — likely the snapshot builder or the as-of view rescanning accumulated facts per
+bar, but that is a hypothesis and has *not* been investigated.
+
+**Consequence for the gate, said plainly:** stability is demonstrated for one full session and is
+reproducible; a multi-day run needs the quadratic behaviour fixed first. Not extrapolated from a
+short run.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

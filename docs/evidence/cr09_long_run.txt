@@ -1,0 +1,121 @@
+TigerQuant CR-09 evidence (part 4) - long-duration stability harness
+Generated: see the git commit this file was added in
+
+Gate item closed: "stability over representative periods".
+
+===========================================================================
+1. What this is, and what it is not
+===========================================================================
+A harness that runs the deterministic simulator over a long SIMULATED market period and checks
+the invariants that could fail over a long run and not over a short one. It is entirely offline:
+no venue, no credentials, no network.
+
+It is NOT a long wall-clock run, and the report refuses to imply one. Two clocks are reported as
+separate fields, never merged into a single "duration":
+
+  simulated_span_hours   how much MARKET time the run covered
+  wall_seconds           how long the machine took
+
+That distinction is the same one this project already had to make for latency, where fixture step
+sizes were labelled "step duration (simulated clock) -- NOT a latency measurement". A single
+merged number would invite exactly that misreading again.
+
+===========================================================================
+2. Live result: one full US equity session
+===========================================================================
+$ python -c "... run_long_sessions(LongRunConfig(sessions=1, bars_per_session=390)) ..."
+
+long-run [STABLE]; 1 simulated session(s), 390 bars; covering 6.50h of MARKET time in 7.3485s
+of wall time (53.1 bars/s); 2158 event(s), 390 decision(s), 1 submitted, 1 filled,
+197 risk denial(s); journal sha256:ef6e4ed0bffd03fa...
+
+  [x] journal hash chain verifies after the whole run
+  [x] journal and database agree after projecting the whole run
+  [x] the run is reproducible: two passes produce the same journal digest
+  [x] every fill traces back to a decision
+  [x] the risk limits were exercised (a limit that never fires is not evidence)
+
+violations: (none)
+final equity: 100563.64
+
+390 one-minute bars is a complete regular session. 2158 journal events, and the chain verified
+across all of them.
+
+197 risk denials is the number that matters most here. A run long enough to exhaust turnover must
+show denials, because a limit that never fires over a long period is not evidence that it works.
+The harness records the count and flags a run that exercised neither the order path nor the limits
+as a violation rather than a pass.
+
+===========================================================================
+3. Two things I had to fix in my own work, both worth recording
+===========================================================================
+A. THE REPORT CLAIMED TWO INVARIANTS IT DID NOT CHECK.
+   `_INVARIANTS` listed "journal and database agree after projecting the whole run" and "every
+   fill traces back to a decision". `_check_invariants` checked neither. The list was written
+   first and the checks were not, which is the worst version of this mistake: the report reads as
+   evidence for something nobody verified.
+   Both are now actually run -- `project()` + `check_drift()` against an in-memory repository,
+   and `lineage_completeness()` over the real event stream -- and both can fail.
+
+B. THE HARNESS WAS IN THE WRONG LAYER.
+   It first lived in `ops/long_run.py` and imported `pipeline.replay`. `ops` sits BELOW
+   `pipeline`, so that is an upward import, and this project's own `test_no_upward_layer_imports`
+   caught it. Moved to `pipeline/long_run.py`, which is what it actually is: an orchestration of
+   the whole pipeline. That is the second time that boundary test has caught a file placed by
+   convenience rather than by layer.
+
+===========================================================================
+4. A PERFORMANCE FINDING: the pipeline is O(n^2) in bars
+===========================================================================
+The first attempt at a five-session run (1950 bars) did not finish in ten minutes, which is far
+slower than the bar count suggested. Measuring it:
+
+    100 bars ->  0.54s
+    200 bars ->  1.76s   (3.3x)
+    400 bars ->  8.20s   (4.7x)
+
+Doubling the bars multiplies the time by ~4, where linear work would double it. That is
+quadratic, and it is why the five-session run did not complete.
+
+This is recorded rather than worked around, because the harness did its job: it surfaced a real
+scaling problem in the replay path that a short scenario cannot show. The likely candidates are
+the snapshot builder or the as-of fact view scanning the accumulated fact set once per bar, but
+that is a hypothesis and has NOT been investigated.
+
+Consequence for this gate: "stability over representative periods" is demonstrated for one full
+session and is reproducible, but a MULTI-DAY run needs the quadratic behaviour fixed first. Said
+plainly rather than extrapolated from a short run.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+761 passed
+
+$ python -m pytest tests/unit/test_long_run.py -q
+25 passed
+
+$ python -m pytest tests -q -m "not requires_db"
+741 passed, 20 deselected
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 95 source files
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. ONE FULL SESSION, not multiple days, because of the quadratic scaling in section 4. The
+   apparatus is built for longer; the pipeline needs fixing before it can be used at length.
+2. The simulated period is generated from a formula, so it cannot reproduce a real market's
+   regimes -- volatility clustering, gaps, halts. It tests STABILITY of the machinery, not the
+   strategy's robustness across market conditions. Those are different claims.
+3. No latency, no real venue, no wall-clock endurance. All three need CR-03's grant.
+4. The generated fixture has one instrument. Cross-instrument and cross-sector behaviour is not
+   exercised.
+5. Alerting is not exercised over a long run either: the drift monitor is tested separately, and
+   a long run produces no drift by construction.
+6. `check_determinism=True` doubles the cost. Left on by default, because reproducibility over a
+   long run is the property most likely to fail in a way a short run cannot show.
