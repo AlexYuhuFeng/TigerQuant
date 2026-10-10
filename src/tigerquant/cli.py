@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tigerquant import IMPLEMENTATION_STATUS, __version__
 from tigerquant.core.clock import SystemClock
@@ -31,12 +31,57 @@ from tigerquant.ops.dashboard import DashboardServer, build_app
 from tigerquant.ops.drift_monitor import DriftMonitor
 from tigerquant.ops.lineage_report import build_lineage, export
 from tigerquant.ops.metrics_report import attribution_by_decision, measure_session
+from tigerquant.ops.settings import (
+    CREDENTIALS,
+    clear_credential,
+    known_credentials,
+    mark_credential_verified,
+    set_secret,
+    settings_report,
+)
 from tigerquant.pipeline.replay import run_replay
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 __all__ = ["build_parser", "main"]
+
+
+def _add_settings_parsers(sub: Any) -> None:
+    """Register the settings command group.
+
+    Extracted because ``build_parser`` had grown past the complexity limit, and a parser that
+    is one long function is hard to review: the whole point of a command registry is that each
+    command's surface is visible on its own.
+    """
+    settings = sub.add_parser(
+        "settings",
+        help="show, set, verify or clear Tiger and model-provider credentials",
+    )
+    settings_sub = settings.add_subparsers(dest="settings_command", required=True)
+
+    show = settings_sub.add_parser("show", help="report every credential's state, masked")
+    show.add_argument("--json", action="store_true", help="emit JSON instead of text")
+
+    setter = settings_sub.add_parser(
+        "set",
+        help="store a credential in the secret store (reads the secret from stdin)",
+    )
+    setter.add_argument("key", choices=known_credentials())
+    setter.add_argument(
+        "--value",
+        default=None,
+        help=(
+            "value for a NON-SECRET setting. For a secret, omit this and pipe it on stdin so "
+            "it does not reach shell history or the process list."
+        ),
+    )
+
+    verify = settings_sub.add_parser("verify", help="mark a credential as exercised successfully")
+    verify.add_argument("key", choices=known_credentials())
+
+    clear = settings_sub.add_parser("clear", help="remove a credential and its marker")
+    clear.add_argument("key", choices=known_credentials())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -175,6 +220,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="also list each decision's contribution",
     )
     metrics.add_argument("--report", type=Path, default=None, help="write the JSON report here")
+
+    _add_settings_parsers(sub)
     return parser
 
 
@@ -340,6 +387,63 @@ def _cmd_metrics(args: argparse.Namespace) -> int:
         print(f"  {key}: {value}")
 
     return 0 if session.attribution.reconciles() else 1
+
+
+def _cmd_settings(args: argparse.Namespace) -> int:
+    """Show, set, verify or clear credentials.
+
+    The store is checked against Git before anything is written: a settings command that could
+    put a key into a public repository is worse than no settings command.
+    """
+    command = args.settings_command
+
+    if command == "show":
+        report = settings_report()
+        if args.json:
+            print(json.dumps(report.as_record(), indent=2, sort_keys=True))
+        else:
+            print(report.render())
+        # Exit 1 when the credentials a paper session needs are absent, so this can gate a run.
+        return 0 if report.ready_for_paper else 1
+
+    if command == "set":
+        spec = next(item for item in CREDENTIALS if item.key == args.key)
+        if args.value is not None:
+            if spec.secret:
+                print(
+                    f"refusing --value for the secret {args.key!r}: it would appear in shell "
+                    "history and in the process list. Pipe it on stdin instead:\n"
+                    f"  echo <value> | python -m tigerquant settings set {args.key}",
+                    file=sys.stderr,
+                )
+                return 2
+            value = args.value
+        else:
+            value = sys.stdin.read()
+        try:
+            written = set_secret(args.key, value)
+        except ConfigurationError as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        print(f"stored {args.key} at {written}")
+        return 0
+
+    if command == "verify":
+        mark_credential_verified(args.key)
+        print(f"marked {args.key} verified")
+        return 0
+
+    # clear
+    removed = clear_credential(args.key)
+    print(
+        f"removed {len(removed)} file(s) for {args.key}" if removed else f"{args.key} was not set"
+    )
+    return 0
+
+
+def _credential_specs() -> tuple[object, ...]:
+
+    return CREDENTIALS
 
 
 def _dev_dsn(mode: Mode) -> str:
@@ -560,6 +664,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "report": _cmd_report,
         "dashboard": _cmd_dashboard,
         "metrics": _cmd_metrics,
+        "settings": _cmd_settings,
         "verify-journal": _cmd_verify,
         "doctor": _cmd_doctor,
     }

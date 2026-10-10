@@ -109,7 +109,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002", "PLR0915", "SLF001", "DTZ001", "DTZ005"]
-"tools/**" = ["T201", "S310", "PLR2004", "BLE001", "PTH123", "PLR0915", "S105", "PLR0913"]
+"tools/**" = ["T201", "S310", "PLR2004", "BLE001", "PTH123", "PLR0915", "S105", "PLR0913", "S603", "S607", "PLW1510"]
 "src/tigerquant/cli.py" = ["T201"]
 
 [tool.ruff.lint.isort]

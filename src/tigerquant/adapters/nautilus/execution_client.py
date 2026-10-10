@@ -359,7 +359,13 @@ def build_execution_client(
             order = getattr(command, "order", None)
             if order is None:
                 return
-            client_order_id = str(getattr(order, "client_order_id", "") or "")
+            # Two forms of the same identifier, deliberately kept apart. The engine's callbacks
+            # are typed and reject a str -- passing one raises TypeError -- while our approval
+            # registry is keyed by str. The first version stringified once and used it for both,
+            # which failed only once a real engine callback was reached. Found by the parity
+            # corpus driving this adapter, not by reading it.
+            raw_client_order_id = getattr(order, "client_order_id", None)
+            client_order_id = str(raw_client_order_id or "")
             strategy_id = getattr(command, "strategy_id", None)
             instrument_id = getattr(order, "instrument_id", None)
 
@@ -370,7 +376,7 @@ def build_execution_client(
                 self.generate_order_denied(
                     strategy_id=strategy_id,
                     instrument_id=instrument_id,
-                    client_order_id=client_order_id,
+                    client_order_id=raw_client_order_id,
                     reason=str(exc),
                     ts_event=clock.timestamp_ns(),
                 )
@@ -383,7 +389,7 @@ def build_execution_client(
                 self.generate_order_denied(
                     strategy_id=strategy_id,
                     instrument_id=instrument_id,
-                    client_order_id=client_order_id,
+                    client_order_id=raw_client_order_id,
                     reason=(
                         "no risk approval exists for this client order id; an order must be "
                         "approved by the gateway before it can reach a venue"
@@ -398,7 +404,7 @@ def build_execution_client(
                 self.generate_order_denied(
                     strategy_id=strategy_id,
                     instrument_id=instrument_id,
-                    client_order_id=client_order_id,
+                    client_order_id=raw_client_order_id,
                     reason=translated.refusal,
                     ts_event=clock.timestamp_ns(),
                 )
@@ -407,7 +413,7 @@ def build_execution_client(
             self.generate_order_submitted(
                 strategy_id=strategy_id,
                 instrument_id=instrument_id,
-                client_order_id=client_order_id,
+                client_order_id=raw_client_order_id,
                 ts_event=clock.timestamp_ns(),
             )
 
@@ -418,7 +424,7 @@ def build_execution_client(
                 self.generate_order_rejected(
                     strategy_id=strategy_id,
                     instrument_id=instrument_id,
-                    client_order_id=client_order_id,
+                    client_order_id=raw_client_order_id,
                     reason=f"broker refused: {exc}",
                     ts_event=clock.timestamp_ns(),
                 )
@@ -428,17 +434,24 @@ def build_execution_client(
                 self.generate_order_rejected(
                     strategy_id=strategy_id,
                     instrument_id=instrument_id,
-                    client_order_id=client_order_id,
+                    client_order_id=raw_client_order_id,
                     reason=ack.message or "rejected by the venue",
                     ts_event=clock.timestamp_ns(),
                 )
                 return
 
+            if not ack.broker_order_id:
+                # Acceptance requires a venue order id, and inventing one would put a
+                # fabricated identifier in the engine's cache. Without one we cannot say the
+                # order was accepted, so we say nothing and let reconciliation resolve it.
+                return
+            from nautilus_trader.model.identifiers import VenueOrderId
+
             self.generate_order_accepted(
                 strategy_id=strategy_id,
                 instrument_id=instrument_id,
-                client_order_id=client_order_id,
-                venue_order_id=None,
+                client_order_id=raw_client_order_id,
+                venue_order_id=VenueOrderId(ack.broker_order_id),
                 ts_event=clock.timestamp_ns(),
             )
 
