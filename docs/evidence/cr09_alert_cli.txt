@@ -1,0 +1,115 @@
+TigerQuant CR-09 evidence (part 10) - the `tigerquant alerts` command group
+Generated: see the git commit this file was added in
+
+Gate item closed: the last CR-09 item reachable offline. Alert sinks are now configurable and
+testable from the command line; until now the wiring was reachable from Python only.
+
+===========================================================================
+1. The three subcommands
+===========================================================================
+    tigerquant alerts show     what is configured, and what each sink will accept
+    tigerquant alerts verify   route a synthetic CRITICAL through EVERY sink; exits non-zero
+                               if any sink failed
+    tigerquant alerts drift    reconcile a journal against an empty database and route it
+
+`verify` is the one that earns its place, and the reasoning is the reason the whole alerting path
+exists: **an alerting path is only ever exercised when something is actually wrong**, which is the
+worst possible moment to discover it does not work -- and it fails SILENTLY, because the whole
+point of the path is that nobody is watching it. `verify` exercises it on demand instead.
+
+Its exit code is what makes it usable: 0 when every sink received the alert, 1 when any failed.
+That is a deployment gate rather than a report.
+
+===========================================================================
+2. Live results
+===========================================================================
+$ python -m tigerquant alerts show
+    alert sinks: 1
+      file      floor=WARNING  reminds every 900s
+      (no webhook sink: set --webhook or TIGERQUANT_ALERT_WEBHOOK to add one. Nothing in this
+       project contacts the network without an explicit endpoint.)
+
+$ python -m tigerquant alerts verify
+    routing a synthetic CRITICAL through 2 sink(s)
+      file
+      verify
+    alerts: 1 considered, 2 delivered, 0 suppressed, 0 failed
+    VERIFY OK: every configured sink received the alert
+
+$ python -m tigerquant alerts drift out/a.jsonl
+    checked 31 journal event(s) against an EMPTY database
+      consistent: False
+      DRIFT -- 31 journal event(s) absent from the database; orders: journal 1, database 0.
+    delivered 1 alert(s) to the local sink; other sinks received theirs
+      [WARNING] drift/drift:journal-database: journal and database disagree -- ...
+
+Both failure paths, checked by hand as well as by test:
+
+    --webhook "not-a-url"   -> ConfigurationError, exit 2
+    --webhook "ftp://x"     -> ConfigurationError, exit 2
+
+A bad endpoint is REFUSED, not skipped. Skipping a misconfigured sink silently is exactly how an
+operator ends up believing they have alerting when they do not.
+
+===========================================================================
+3. No network without an endpoint
+===========================================================================
+`--webhook` or `TIGERQUANT_ALERT_WEBHOOK` are the only two ways a network sink can come into
+existence, there is no default host, and `show` STATES the absence rather than leaving it implied
+-- "no webhook sink" and "a webhook that silently did not register" look identical in a bare list
+of sinks.
+
+`verify` defaults its probe to `out/alerts_verify.jsonl` rather than the real `out/alerts.jsonl`,
+so a probe never pollutes the log an operator reads during an incident. It also uses an INFO floor
+rather than the configured one, because a probe filtered out by the floor under test would report
+a false failure.
+
+===========================================================================
+4. The determinism control caught this module, immediately
+===========================================================================
+Adding `alert_cli.py` broke `tigerquant doctor` on the first run:
+
+    [FAIL] determinism: offenders: alert_cli.py:datetime.datetime.now(), ...
+
+Two tests failed with it. The module legitimately reads the wall clock -- "now" is the correct
+instant for a synthetic probe and for a reconciliation the operator asked for at this moment, and
+neither is replayed nor contributes a journaled event -- so it is now on the operational
+allow-list WITH that reason recorded.
+
+Worth recording because it is the control working as intended on new code, within seconds, without
+anyone remembering to run it. That is the payoff from closing the aliasing hole two rounds ago:
+before that fix this exact call would have been invisible.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+859 passed
+
+$ python -m pytest tests/unit/test_alert_cli.py -q
+25 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 97 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. `verify` proves the local sinks received the alert. For a webhook it can only report that the
+   POST succeeded -- a 200 is not proof a human saw it -- and the command says so in its output
+   rather than implying delivery was confirmed end to end.
+2. `alerts drift` compares against an EMPTY in-memory database rather than the real one. That
+   makes it a wiring and routing check, NOT a live reconciliation; the real one is
+   `tigerquant drift` against PostgreSQL. Pointing this at a live database is not implemented.
+3. No alerting configuration file. Sinks come from flags and two environment variables, which is
+   enough for one operator and would not be for a fleet.
+4. Suppression state is still in-process, so `show --suppressed` will always report nothing for a
+   freshly started process. It reports on the router THIS PROCESS built, not on history.
+5. `alert_from_drift` remains the only adapter: the watchdog and risk gateway do not yet produce
+   Alerts, so routing still covers one source.

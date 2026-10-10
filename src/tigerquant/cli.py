@@ -20,13 +20,14 @@ from typing import TYPE_CHECKING, Any
 
 from tigerquant import IMPLEMENTATION_STATUS, __version__
 from tigerquant.core.clock import SystemClock
-from tigerquant.core.enums import Mode, capabilities_for
+from tigerquant.core.enums import Mode, Severity, capabilities_for
 from tigerquant.core.errors import ConfigurationError, IntegrationUnavailable, TigerQuantError
 from tigerquant.db.postgres import PostgresRepository, connect
 from tigerquant.db.projector import check_drift, project
 from tigerquant.events.journal import AppendOnlyJournal
 from tigerquant.events.registry import event_type_names
 from tigerquant.market.fixtures import load_scenario
+from tigerquant.ops.alert_cli import cmd_alerts
 from tigerquant.ops.dashboard import DashboardServer, build_app
 from tigerquant.ops.drift_monitor import DriftMonitor
 from tigerquant.ops.lineage_report import build_lineage, export
@@ -82,6 +83,89 @@ def _add_settings_parsers(sub: Any) -> None:
 
     clear = settings_sub.add_parser("clear", help="remove a credential and its marker")
     clear.add_argument("key", choices=known_credentials())
+
+
+def _add_alerts_parsers(sub: Any) -> None:
+    """Register the `alerts` command group.
+
+    `verify` is the one that earns its place: an alerting path is only ever exercised when
+    something is wrong, which is the worst moment to find out it does not work.
+    """
+    alerts = sub.add_parser(
+        "alerts",
+        help="inspect alert sinks, PROVE they receive alerts, and route a real drift check",
+    )
+    alerts_sub = alerts.add_subparsers(dest="alerts_command", required=True)
+
+    show = alerts_sub.add_parser("show", help="report the configured sinks and their floors")
+    show.add_argument("--suppressed", action="store_true", help="also report suppression counts")
+
+    verify = alerts_sub.add_parser(
+        "verify",
+        help=(
+            "route a synthetic CRITICAL through every sink and report what actually arrived. "
+            "Exits non-zero if any sink failed, so it can gate a deployment."
+        ),
+    )
+    verify.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help=(
+            "file sink for the probe. Defaults to out/alerts_verify.jsonl so a probe never "
+            "pollutes the real alert log."
+        ),
+    )
+
+    drift = alerts_sub.add_parser(
+        "drift",
+        help="check a journal against an empty database and route what it finds",
+    )
+    drift.add_argument("journal", type=Path, help="audit journal JSONL to reconcile")
+    drift.add_argument(
+        "--mode",
+        default=Mode.BACKTEST.value,
+        choices=[mode.value for mode in Mode],
+        help="the mode this journal belongs to",
+    )
+
+    show.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help="file sink path (default: out/alerts.jsonl)",
+    )
+
+    drift.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help="file sink path (default: out/alerts.jsonl)",
+    )
+
+    # Shared by all three: which OTHER sinks exist. `--log` is declared per subcommand above
+    # because `verify` defaults it somewhere different, and a duplicate declaration would be an
+    # argparse error rather than an override.
+    for parser in (show, verify, drift):
+        parser.add_argument(
+            "--webhook",
+            default=None,
+            help=(
+                "http(s) endpoint for a webhook sink. Omit and nothing contacts the network; "
+                "TIGERQUANT_ALERT_WEBHOOK is the environment equivalent."
+            ),
+        )
+        parser.add_argument(
+            "--floor",
+            default=Severity.WARNING.value,
+            help="minimum severity the sinks accept (INFO, WARNING, CRITICAL)",
+        )
+        parser.add_argument(
+            "--reminder",
+            type=float,
+            default=900.0,
+            help="seconds before an UNRESOLVED condition is delivered again; 0 never repeats",
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -222,6 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
     metrics.add_argument("--report", type=Path, default=None, help="write the JSON report here")
 
     _add_settings_parsers(sub)
+    _add_alerts_parsers(sub)
     return parser
 
 
@@ -603,6 +688,11 @@ _OPERATIONAL_CLOCK_MODULES = frozenset(
     {
         # Timestamps a verification marker: "when did we last check this credential".
         "settings.py",
+        # A CLI command a HUMAN runs on demand. "Now" is the correct instant for a synthetic
+        # probe and for a reconciliation the operator asked for at this moment; neither is
+        # replayed, and neither contributes a journaled event. This module was caught by the
+        # determinism check the moment it was added, which is the control working.
+        "alert_cli.py",
         # The provider's fallback clock when the composition root supplies none. A model call is
         # not replayed; the prompt digest is what proves what was sent.
         "model.py",
@@ -720,6 +810,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dashboard": _cmd_dashboard,
         "metrics": _cmd_metrics,
         "settings": _cmd_settings,
+        "alerts": cmd_alerts,
         "verify-journal": _cmd_verify,
         "doctor": _cmd_doctor,
     }

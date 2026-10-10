@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: an `alerts` CLI subcommand; CR-03 awaits the owner's consent
+Current CR: a supervised long-running process; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -803,6 +803,37 @@ plus: repeats within one outage are still suppressed (the fix did not turn suppr
 second outage pages once rather than once per cycle, the recovery is still recorded in history,
 and two structural tests that count `self._route(result)` occurrences so a future refactor
 reintroducing an early return fails here rather than in the field.
+
+### 2026-10-10 - CR-09 part 10: the `tigerquant alerts` command group
+
+Full evidence: `docs/evidence/cr09_alert_cli.txt`. The last CR-09 item reachable offline: sinks are
+now configurable and testable from the command line rather than only from Python.
+
+```
+tigerquant alerts show     what is configured, and what each sink will accept
+tigerquant alerts verify   route a synthetic CRITICAL through EVERY sink; exits non-zero on failure
+tigerquant alerts drift    reconcile a journal against an empty database and route it
+```
+
+**`verify` is the one that earns its place**, and the reason is the reason the alerting path
+exists at all: an alerting path is only ever exercised when something is actually wrong -- the
+worst possible moment to discover it does not work -- and it fails SILENTLY, because the whole
+point is that nobody is watching it. `verify` exercises it on demand. Its exit code (0 clean, 1
+any sink failed) makes it a deployment gate rather than a report.
+
+Both failure paths were checked by hand as well as by test: a bare host and an `ftp://` URL are
+REFUSED with exit 2, not skipped. Skipping a misconfigured sink silently is how an operator ends up
+believing they have alerting when they do not.
+
+**The determinism control caught this module immediately.** Adding `alert_cli.py` broke `doctor` on
+the first run -- `offenders: alert_cli.py:datetime.datetime.now()` -- and two tests failed with it.
+The wall-clock read is legitimate here ("now" is correct for an on-demand probe, and nothing is
+replayed), so it went on the operational allow-list *with that reason recorded*. Worth noting as
+the payoff from closing the detector's aliasing hole two rounds ago: before that fix, this exact
+call would have been invisible.
+
+`verify` defaults its probe to `out/alerts_verify.jsonl`, not the real alert log, so a probe never
+pollutes what an operator reads during an incident.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
