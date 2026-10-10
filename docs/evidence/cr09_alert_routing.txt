@@ -1,0 +1,115 @@
+TigerQuant CR-09 evidence (part 7) - alert routing
+Generated: see the git commit this file was added in
+
+Gate item closed: "alert routing". New module: `src/tigerquant/ops/alerts.py`, 35 tests.
+
+===========================================================================
+1. What was missing
+===========================================================================
+The drift monitor already decided WHETHER something was wrong and already suppressed repeats
+across its own cycles. What did not exist was delivery: `DriftCheckResult` could report
+`alerted=True` and nothing left the process. An alert that is only counted is not an alert.
+
+Routing raises different questions from detection, and the four below shaped the design.
+
+===========================================================================
+2. Two properties carry most of the weight
+===========================================================================
+A. NO NETWORK BY DEFAULT.
+
+   `WebhookSink` is the only network path in the module and it REFUSES TO EXIST without an
+   explicit http(s) endpoint:
+
+       WebhookSink("")                       -> ConfigurationError
+       WebhookSink("example.com/hook")       -> ConfigurationError
+       WebhookSink("ftp://example.com")      -> ConfigurationError
+       WebhookSink("file:///etc/passwd")     -> ConfigurationError
+
+   `urllib.request` is imported inside `deliver()`, not at module scope, so importing the module
+   cannot contact anything. A test asserts that placement by scanning the source, because the
+   import location is the guarantee.
+
+   This is the same posture as `HttpNewsConnector`, which refuses to fetch without an entitlement
+   reference. A router that reached the network because a configuration field was empty is the
+   failure being prevented.
+
+B. A SUPPRESSED ALERT STAYS COUNTABLE.
+
+   "Nothing happened" and "everything was suppressed" are different states. A router that renders
+   them identically hides an outage behind a quiet log. Every suppression is recorded with its
+   reason and exposed via `suppressed_counts()`:
+
+       {"memory/drift:journal-database:already-delivered": 3}
+
+   A test asserts the distinction directly: a quiet run and a fully-suppressed run both deliver
+   zero, and only one of them has suppressions to show for it.
+
+===========================================================================
+3. The suppression rule, and why it is per-sink
+===========================================================================
+Suppression is keyed `(condition key, sink name)` and is a TRANSITION rule: the first occurrence
+is delivered, repeats are withheld until either the reminder interval elapses or the condition
+clears and returns. That is the same shape the drift monitor uses, one level down, so a condition
+observed by two sources is one page per sink rather than two.
+
+`clear(key)` exists because without it a problem that comes back after an hour would stay
+suppressed for ever -- the failure mode of every naive deduplicator.
+
+Severity floors are PER SINK, because the question an operator asks is "what is worth waking me
+up", and the answer differs per channel. A CRITICAL floor for a pager and an INFO floor for a log
+file is one router, not two.
+
+`severity_rank` treats an UNKNOWN severity as CRITICAL, deny-by-default for the same reason
+`AccountIdentity.is_live_capable` does: an alert nobody can classify must not be silently treated
+as routine.
+
+===========================================================================
+4. Delivery failure is visible, and does not cascade
+===========================================================================
+A sink that raises is recorded in `RoutingReport.failures` with the exception text, and:
+
+  * one failing sink does not stop the others -- an alerting path that fails as a unit fails
+    completely, which is the worst property for this particular component;
+  * a failed delivery is NOT recorded as delivered, so the next occurrence is not suppressed by a
+    delivery that never happened;
+  * `RoutingReport.summary()` shouts about failures rather than reporting a quiet success.
+
+===========================================================================
+5. Redaction
+===========================================================================
+Alert titles, details and fields are free text that reaches log files and webhooks, which
+AGENTS.md invariant 11 covers. Everything is passed through `core.redaction.redact` in both
+`as_record()` and `render()`, and tests assert a credential-shaped value does not survive either.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+811 passed
+
+$ python -m pytest tests/unit/test_alerts.py -q
+35 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 96 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. NOT WIRED TO A CLI COMMAND OR TO A RUNNING LOOP. The module is a library with tests; the drift
+   monitor does not yet call it and there is no `tigerquant alerts` subcommand. That is the next
+   step and it is NOT done. Stated plainly rather than implied by the module's existence.
+2. No sink is exercised against a real endpoint. WebhookSink is tested for its REFUSALS, not for a
+   successful POST.
+3. The router is in-process and holds suppression state in memory. A restart re-delivers the first
+   occurrence of every open condition, which errs toward noise rather than silence -- the right
+   direction, but it is not durable suppression.
+4. Escalation is a severity carried through from the drift monitor. The router does not itself
+   escalate a condition that stays unresolved for a long time; the monitor's own policy does that.
+5. `alert_from_drift` is the only adapter. The watchdog and risk gateway do not yet produce Alerts,
+   so routing covers one source.
+6. No alert is routed by a long run: a clean run produces no drift by construction, so the
+   integration between the harness and the router is untested end to end.

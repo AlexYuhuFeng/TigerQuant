@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-09 stability gate met for a full trading week; CR-03 awaits the owner's consent
+Current CR: wire alert routing to the CLI and the loop; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -697,6 +697,40 @@ because the gate no longer requires it.
 **A question this raised and did NOT answer:** the strategy citing every bar is what made this
 quadratic. It is legitimate, but whether a decision's provenance *should* grow without bound is a
 design question about evidence scoping, not a performance one. Recorded as a limitation.
+
+### 2026-10-10 — CR-09 part 7: alert routing
+
+Full evidence: `docs/evidence/cr09_alert_routing.txt`. New module `ops/alerts.py`, 35 tests.
+
+**What was missing:** the drift monitor decided *whether* something was wrong and suppressed its own
+repeats, but nothing left the process. `DriftCheckResult` could report `alerted=True` and no human
+would ever see it. **An alert that is only counted is not an alert.**
+
+**Two properties carry the weight, and both are about failure modes rather than success.**
+
+**NO NETWORK BY DEFAULT.** `WebhookSink` is the only network path and it **refuses to exist**
+without an explicit http(s) endpoint — an empty string, a bare host, `ftp://` and `file://` are all
+refused. `urllib.request` is imported *inside* `deliver()`, and a test scans the source to assert
+it stays there, because the import location is the guarantee. Same posture as `HttpNewsConnector`
+refusing to fetch without an entitlement reference.
+
+**A SUPPRESSED ALERT STAYS COUNTABLE.** "Nothing happened" and "everything was suppressed" are
+different states, and a router that renders them identically hides an outage behind a quiet log.
+Every suppression is recorded with its reason. A test asserts the distinction directly: a quiet run
+and a fully-suppressed run both deliver zero, and only one has suppressions to show for it.
+
+**Suppression is per-sink and transition-based**, so a condition seen by two sources is one page
+per sink rather than two. `clear(key)` exists because without it a problem returning after an hour
+would stay suppressed for ever — the failure mode of every naive deduplicator. Severity floors are
+per sink, because "what is worth waking me up" differs per channel.
+
+**A failing sink is visible and does not cascade**: it is recorded with its exception, one bad sink
+does not stop the others, and a failed delivery is *not* marked delivered — so the next occurrence
+is not suppressed by a delivery that never happened.
+
+**Not done, and stated as such:** the module is not yet wired to a CLI command or to the drift
+monitor's loop. It is a tested library, not a running alerting path, and the evidence file says so
+in those words.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
