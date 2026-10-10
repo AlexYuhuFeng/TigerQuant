@@ -35,7 +35,12 @@ from tigerquant.core.redaction import redact
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+#: The condition key for journal/database drift. Named once: the monitor clears suppression by
+#: it and the router suppresses by it, and two literals would drift apart.
+DRIFT_ALERT_KEY = "drift:journal-database"
+
 __all__ = [
+    "DRIFT_ALERT_KEY",
     "Alert",
     "AlertRouter",
     "AlertSink",
@@ -354,7 +359,7 @@ def alert_from_drift(result: Any, *, source: str = "drift") -> Alert | None:
     severity = getattr(result, "severity", Severity.WARNING)
     detail = str(getattr(result, "detail", "") or "")
     return Alert(
-        key="drift:journal-database",
+        key=DRIFT_ALERT_KEY,
         severity=severity,
         title="journal and database disagree",
         detail=detail,

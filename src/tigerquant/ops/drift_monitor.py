@@ -34,6 +34,12 @@ from typing import TYPE_CHECKING
 from tigerquant.core.clock import ensure_utc
 from tigerquant.core.enums import ReasonCode, Severity
 from tigerquant.db.projector import check_drift
+from tigerquant.ops.alerts import (
+    DRIFT_ALERT_KEY,
+    AlertRouter,
+    RoutingReport,
+    alert_from_drift,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -139,6 +145,15 @@ class DriftMonitor:
     #: its history and measures its own alert rate; it simply emits nothing.
     emitter: EventEmitter | None = None
     policy: DriftAlertPolicy = DEFAULT_DRIFT_POLICY
+    #: Where alerts are DELIVERED, as opposed to `emitter`, which is where they are RECORDED.
+    #:
+    #: The two are separate because they fail differently: the emitter writes to the journal,
+    #: which is the record of authority, while the router reaches an operator. A monitor with an
+    #: emitter and no router reports drift into a journal nobody is watching -- which is exactly
+    #: the state this project was in until the router existed.
+    #:
+    #: Declared AFTER `policy` so adding it does not shift any positional argument.
+    router: AlertRouter | None = None
     _state: _MonitorState = field(default_factory=_MonitorState, repr=False)
     _history: list[DriftCheckResult] = field(default_factory=list, repr=False)
 
@@ -245,7 +260,39 @@ class DriftMonitor:
             detail=report.summary(),
         )
         self._history.append(result)
+        self._route(result)
         return result
+
+    def _route(self, result: DriftCheckResult) -> RoutingReport | None:
+        """Hand the outcome to the router, if one was configured.
+
+        Routing happens HERE rather than in the caller so the loop, the CLI and any future
+        supervisor all get the same behaviour without having to remember to ask for it. The
+        alternative -- every caller converting results and calling route() itself -- is how one
+        caller quietly stops alerting.
+
+        Returns the routing report, or None when there is no router or nothing to route. Never
+        raises: a broken alerting path must not stop the reconciliation it is reporting on,
+        because then a drift would also silence its own warning.
+        """
+        if self.router is None:
+            return None
+
+        if result.consistent:
+            # The condition cleared. Forget it, so its return is a NEW alert rather than a
+            # suppressed repeat -- the failure mode of every naive deduplicator.
+            self.router.clear(DRIFT_ALERT_KEY)
+            return None
+
+        alert = alert_from_drift(result)
+        if alert is None:
+            # The monitor decided this occurrence repeats one it already reported. The router
+            # keeps its own suppression, and double-suppressing here would lose the count.
+            return None
+        try:
+            return self.router.route([alert])
+        except Exception:  # noqa: BLE001 - alerting must never break reconciliation
+            return None
 
     def _emit(
         self,

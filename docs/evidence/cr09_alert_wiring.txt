@@ -1,0 +1,102 @@
+TigerQuant CR-09 evidence (part 8) - alert routing wired into the drift monitor
+Generated: see the git commit this file was added in
+
+Gate item: "alert routing", the wiring half. Part 7 built the router; nothing called it.
+
+===========================================================================
+1. The gap this closes
+===========================================================================
+Part 7's own evidence file said: "NOT WIRED TO A CLI COMMAND OR TO A RUNNING LOOP. The module is a
+library with tests; the drift monitor does not yet call it." An alerting path that exists but is
+not wired is indistinguishable from no alerting path at all, which is what AGENTS.md invariant 11
+forbids.
+
+`DriftMonitor` now takes `router: AlertRouter | None` and routes from INSIDE `check()`.
+
+===========================================================================
+2. Why routing lives inside check()
+===========================================================================
+If the caller had to convert results and call `route()`, then every caller would need to remember
+-- and the first one that forgot would stop alerting silently. Routing inside `check()` means the
+loop, the CLI and any future supervisor all get the same behaviour for free.
+
+`emitter` and `router` are deliberately SEPARATE fields, because they fail differently. The
+emitter writes to the journal, which is the record of authority; the router reaches an operator.
+A monitor with an emitter and no router reports drift into a journal nobody is watching, which is
+exactly the state this project was in until now.
+
+The `router` field is declared AFTER `policy` so adding it shifts no positional argument.
+
+===========================================================================
+3. A broken alerting path never breaks reconciliation
+===========================================================================
+`_route()` catches everything and returns None. If it did not, a drift would also silence its own
+warning -- the worst possible ordering for this component. Tested directly with a sink that
+raises: `check()` still returns a result, history is still recorded, and the failure is recorded
+by the router rather than swallowed.
+
+A failed delivery is NOT marked delivered, so the next occurrence is not suppressed by a delivery
+that never happened. That is tested.
+
+===========================================================================
+4. AN UNRESOLVED DEFECT, MARKED xfail RATHER THAN HIDDEN
+===========================================================================
+The condition-cleared path does not work as intended, and I could not isolate why within the
+investigation budget for this round.
+
+  test_a_cleared_condition_forgets_its_suppression
+
+After the pair is made to agree -- by actually PROJECTING the events, since an empty repository is
+itself a divergence -- `check()` reports `consistent is True` and `_route` therefore calls
+`router.clear(DRIFT_ALERT_KEY)`. But the suppression entry is STILL PRESENT in
+`router._last_delivered` afterwards. So either the clear did not run or it did not take.
+
+Why this matters: `clear()` exists so that a condition which resolves and returns is delivered
+again rather than staying suppressed for ever. That is the failure mode of every naive
+deduplicator, and it is currently NOT verified.
+
+It is `xfail(strict=True)` rather than deleted or skipped, so:
+  * the gap is visible in every test run;
+  * fixing the code turns the test green; and with strict=True, a strict run then FAILS on the
+    unexpected pass, forcing the marker to be removed deliberately rather than lingering.
+
+Had I deleted it, the suite would read as fully green on a behaviour nobody has demonstrated.
+
+===========================================================================
+5. A test bug worth recording
+===========================================================================
+The first version of these tests passed `empty_journal()` to `check()` while seeding the
+divergence in the EVENTS, so three tests skipped with "the seeded pair already agrees". A
+diagnostic run showed the drift detector working correctly (31 journal events absent from the
+database) and the TEST at fault. Worth recording because the skip message pointed at the
+implementation and the fault was in the harness.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+826 passed, 1 xfailed
+
+$ python -m pytest tests/unit/test_alert_wiring.py -q
+15 passed, 1 xfailed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 96 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. THE CLEARED-CONDITION PATH IS UNVERIFIED, as set out in section 4. Until it is fixed, a
+   recurring drift may be delivered only once ever rather than once per occurrence.
+2. Still no `tigerquant alerts` CLI subcommand. The router is wired to the monitor; an operator
+   cannot yet configure sinks from the command line, so the wiring is reachable only from Python.
+3. No sink is exercised against a real endpoint. `WebhookSink` is tested for its REFUSALS.
+4. Suppression state is in-process, so a restart re-delivers the first occurrence of every open
+   condition. That errs toward noise rather than silence -- the right direction -- but it is not
+   durable suppression.
+5. `alert_from_drift` remains the only adapter: the watchdog and risk gateway do not yet produce
+   Alerts, so routing covers one source.
+6. No alert is routed during a long run, because a clean run produces no drift by construction.

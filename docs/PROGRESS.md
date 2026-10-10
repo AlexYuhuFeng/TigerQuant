@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: wire alert routing to the CLI and the loop; CR-03 awaits the owner's consent
+Current CR: fix the cleared-condition suppression path (xfail); CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -731,6 +731,37 @@ is not suppressed by a delivery that never happened.
 **Not done, and stated as such:** the module is not yet wired to a CLI command or to the drift
 monitor's loop. It is a tested library, not a running alerting path, and the evidence file says so
 in those words.
+
+### 2026-10-10 - CR-09 part 8: alert routing wired into the drift monitor
+
+Full evidence: `docs/evidence/cr09_alert_wiring.txt`. Part 7 built the router and nothing called
+it; an alerting path that exists but is unwired is indistinguishable from none, which invariant 11
+forbids.
+
+**Routing now happens inside `check()`**, not in the caller. If callers had to convert results and
+call `route()` themselves, the first one that forgot would stop alerting silently. `emitter` and
+`router` are separate fields because they fail differently: the emitter writes to the journal
+(record of authority), the router reaches an operator. A monitor with an emitter and no router
+reports drift into a journal nobody is watching -- exactly the state this project was in until now.
+
+**A broken alerting path never breaks reconciliation.** `_route()` catches everything; if it did
+not, a drift would also silence its own warning. Tested with a raising sink: `check()` still
+returns, history is still recorded, and a failed delivery is not marked delivered -- so the next
+occurrence is not suppressed by a delivery that never happened.
+
+**AN UNRESOLVED DEFECT, MARKED xfail RATHER THAN HIDDEN.** The condition-cleared path does not work
+as intended: after the pair is made to agree (by *projecting* the events -- an empty repository is
+itself a divergence), `check()` reports consistent and `_route` calls `router.clear(...)`, yet the
+suppression entry is still present afterwards. So a condition that resolves and returns may be
+delivered only once ever. It is `xfail(strict=True)` rather than deleted or skipped, so the gap is
+visible in every run, fixing it turns the test green, and strict mode then forces the marker to be
+removed deliberately. **Had I deleted it, the suite would read as fully green on a behaviour nobody
+has demonstrated.**
+
+**A test bug worth recording:** the first version passed `empty_journal()` to `check()` while
+seeding the divergence in the *events*, so three tests skipped with "the seeded pair already
+agrees". A diagnostic showed the drift detector working correctly and the *test* at fault -- the
+skip message pointed at the implementation.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
