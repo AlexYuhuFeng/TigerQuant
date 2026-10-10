@@ -30,6 +30,7 @@ from tigerquant.market.fixtures import load_scenario
 from tigerquant.ops.dashboard import DashboardServer, build_app
 from tigerquant.ops.drift_monitor import DriftMonitor
 from tigerquant.ops.lineage_report import build_lineage, export
+from tigerquant.ops.metrics_report import attribution_by_decision, measure_session
 from tigerquant.pipeline.replay import run_replay
 
 if TYPE_CHECKING:
@@ -147,6 +148,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dash.add_argument("--host", default="127.0.0.1", help="loopback address only")
     dash.add_argument("--port", type=int, default=8787, help="port to bind")
+
+    metrics = sub.add_parser(
+        "metrics",
+        help="measure a session: P&L attribution, step durations, activity counts",
+    )
+    metrics.add_argument("journal", type=Path, help="audit journal JSONL to measure")
+    metrics.add_argument(
+        "--mode",
+        default=Mode.BACKTEST.value,
+        choices=[mode.value for mode in Mode],
+        help="the mode this journal belongs to",
+    )
+    metrics.add_argument(
+        "--clock-source",
+        default="SimulatedClock",
+        help=(
+            "which clock produced the timestamps. The default is honest for an offline "
+            "replay; pass SystemClock only for a real session, or the durations will be "
+            "reported as step sizes rather than latency."
+        ),
+    )
+    metrics.add_argument(
+        "--by-decision",
+        action="store_true",
+        help="also list each decision's contribution",
+    )
+    metrics.add_argument("--report", type=Path, default=None, help="write the JSON report here")
     return parser
 
 
@@ -283,6 +311,35 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     finally:
         server.stop()
     return 0
+
+
+def _cmd_metrics(args: argparse.Namespace) -> int:
+    """Measure one journal. Read-only; writes nothing but its report.
+
+    Exit codes: 0 when the P&L attribution reconciles with the ledger, 1 when it does not.
+    A report whose parts do not add up should be rejected, not published quietly.
+    """
+    mode = Mode(args.mode)
+    path = Path(args.journal)
+    with AppendOnlyJournal(path, mode, fsync=False) as journal:
+        events = tuple(record.event for record in journal.iter_records())
+
+    session = measure_session(events, mode=mode.value, clock_source=args.clock_source)
+    payload: dict[str, object] = session.as_record()
+    if args.by_decision:
+        payload["by_decision"] = list(attribution_by_decision(events, mode=mode.value))
+
+    if args.report is not None:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"wrote {args.report}")
+
+    print(session.summary())
+    print(f"  {session.latency.summary()}")
+    for key, value in sorted(session.facts.items()):
+        print(f"  {key}: {value}")
+
+    return 0 if session.attribution.reconciles() else 1
 
 
 def _dev_dsn(mode: Mode) -> str:
@@ -502,6 +559,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "drift": _cmd_drift,
         "report": _cmd_report,
         "dashboard": _cmd_dashboard,
+        "metrics": _cmd_metrics,
         "verify-journal": _cmd_verify,
         "doctor": _cmd_doctor,
     }

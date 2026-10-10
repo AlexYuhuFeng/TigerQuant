@@ -1,0 +1,133 @@
+TigerQuant CR-09 evidence (part 3) - measured metrics and incident runbooks
+Generated: see the git commit this file was added in
+
+Gate items closed here: "latency, P&L attribution, stability" and the incident runbooks.
+Gate items still open: long-duration paper/shadow runs (blocked on CR-03's write-scoped grant).
+
+===========================================================================
+1. The most important thing this module does is refuse to mislead
+===========================================================================
+CR-09's gate says "latency". The offline replay drives an injected SimulatedClock advancing by
+fixture-defined steps, so a duration measured from those timestamps is a FIXTURE STEP SIZE. It
+says nothing about how the system behaves against a real venue.
+
+Reporting those as latency would be the single most misleading thing this module could do, so:
+
+  * LatencyReport carries a `clock_source`;
+  * `is_observed` is a property derived from it, not a field anyone can set;
+  * the field is named `step_duration` and the label reads
+        "step duration (simulated clock)"
+    with the suffix "-- NOT a latency measurement; these are fixture step sizes and say nothing
+    about behaviour against a real venue";
+  * the default clock_source is "SimulatedClock", so the conservative label is what you get by
+    accident and a real measurement requires passing "SystemClock" deliberately.
+
+Observed latency needs a real paper session, which needs CR-03's grant. Until then the module
+measures what it can and says plainly what it cannot.
+
+$ python -m tigerquant metrics out/cr09_journal.jsonl --mode BACKTEST
+session [BACKTEST]: 31 event(s) over 360s, 6 decision(s) (0 abstention(s)), 1 order(s),
+1 fill(s), 0 refusal(s); P&L: equity 100000.00 -> 100015.48 (+15.48), gross -0.04,
+commission 0.04, net -0.08 [RESIDUAL +15.56 unattributed ...]
+  step duration (simulated clock) (clock: SimulatedClock): decision->intent p95=0ms, ...
+  -- NOT a latency measurement; these are fixture step sizes ...
+  durations_are_observed: False
+
+===========================================================================
+2. P&L attribution caught a real property of the event stream
+===========================================================================
+The first run reported DOES NOT RECONCILE, and it was right. Investigating rather than
+adjusting the tolerance found this:
+
+  PositionChanged: SPY qty 8, average_cost 602.5652, mark_price 602.5602, unrealized_pnl -0.04
+  final LedgerMarked:  cash 95179.48, equity 100015.48
+
+Equity implies a position value of 4836.00, i.e. a mark of 604.50 -- not the 602.5602 the
+position snapshot carries. The cause is structural: `PositionChanged` is emitted when a position
+CHANGES, carrying the mark that applied then, while `LedgerMarked` keeps being emitted as the
+mark moves. The last position snapshot is therefore from an earlier instant than the final
+valuation, and the difference between those two marks is unattributable from these events alone.
+
+Rather than hide it, the report names it:
+
+  * `residual` = equity change minus the sum of the attributed parts, and it appears in
+    `summary()` as "RESIDUAL +15.56 unattributed - usually a PositionChanged snapshot taken at a
+    different instant than the final LedgerMarked, not an arithmetic error";
+  * `metrics` exits 1 when the residual exceeds a cent, so a report that does not add up cannot
+    be published quietly.
+
+A second, quieter bug came out of the same work: `sum_of_parts` was computed by summing the
+per-instrument breakdown, so a report carrying aggregate figures but no instrument rows returned
+`-commission` -- confidently wrong. It is now built from the aggregates, and a separate
+`breakdown_agrees` check compares the breakdown against them, because a report can reconcile with
+the ledger while its own breakdown contradicts it.
+
+===========================================================================
+3. Attribution is exact, and fees are not hidden
+===========================================================================
+Every figure is Decimal, taken from the ledger's own realised amounts and the marks the journal
+recorded. Commission is reported SEPARATELY rather than folded into P&L, because folding it in
+hides how much of a result was eaten by friction. `attribution_by_decision` joins through the
+lineage so "which idea made the money" is answerable, not just "which instrument".
+
+===========================================================================
+4. Incident runbooks
+===========================================================================
+docs/runbooks/README.md - eight runbooks, each in three parts: what you will see, what to do,
+and what NOT to do. The third part is the one that stops an operator making an incident worse.
+
+  RB-01 drift reported          RB-05 broker unreachable
+  RB-02 an order is stuck       RB-06 attribution does not reconcile
+  RB-03 the hash chain broke    RB-07 the model provider fails
+  RB-04 the watchdog halted     RB-08 someone asks for live trading
+
+Two of them matter more than the rest. RB-03 says explicitly: do NOT regenerate the chain from
+the database, because the database was built FROM the journal and rebuilding it would launder a
+corruption into a consistent-looking history. RB-08 is not an incident at all -- it is the
+boundary, and the runbook's instruction is to decline and point at LIVE_READINESS.md.
+
+The exit-code table is a contract with whoever scripts the response, so it is checked:
+`tests/unit/test_runbooks.py` verifies that every subcommand the runbooks name actually exists
+(read from the argparse parser, not a hardcoded list), that the escalation threshold and reminder
+cadence the drift runbook quotes match the configured policy, that the halt runbook names the
+real owner actor, and that the cancel exemption it claims is true of RiskState.
+
+One test needed fixing rather than the runbook: an assertion on raw markdown broke when a
+paragraph was reflowed, so the assertions now run against whitespace-collapsed prose. A test that
+fails on line wrapping teaches people to edit the test rather than the document.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+660 passed
+
+$ python -m pytest tests/unit/test_metrics_report.py tests/unit/test_runbooks.py -q
+39 passed
+
+$ python -m tigerquant doctor
+[PASS] determinism (no uuid4 / wall-clock calls outside core.clock): clean
+[PASS] mode capabilities (no submission in BACKTEST/SHADOW, LIVE gated): clean
+[PASS] no live enablement surface in source: clean
+[PASS] implementation status is labelled: SIMULATED
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 91 source files
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. No observed latency, and none is possible until CR-03's grant exists. Every duration in this
+   repository today is a fixture step size.
+2. The residual is reported, not resolved. Attributing it properly needs per-instrument marks
+   alongside each LedgerMarked, which the event schema does not currently carry. That is a
+   schema change and has not been made.
+3. "Stability over representative periods" needs long-duration runs, which need the same grant.
+   What exists is the measurement apparatus, not a long run through it.
+4. The runbooks are untested as prose. A test can check that the commands exist and the numbers
+   match; it cannot check that the diagnosis is right, and only a real incident can.
+5. No alert routing. Alerts are journaled, and the runbooks assume someone is reading the journal.
+   There is no pager, no email and no webhook.

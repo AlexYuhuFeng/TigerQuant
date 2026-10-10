@@ -33,23 +33,24 @@ Last updated: 2026-10-10.
 | CR-06 | **PARTIAL** | `docs/evidence/cr06_model_interface.txt` | Provider-neutral path, versioned prompt contract, failure handling (every failure abstains) and the benchmark harness are done and tested. No provider has been called: that needs an API key. Status is `SIMULATED`. |
 | CR-07 | **COMPLETE** | `docs/evidence/cr07_risk_controls.txt` | Session limits (turnover, daily loss, drawdown, rolling order rate), the risk-metrics accumulator, and an independent watchdog whose only power is to stop. Includes the privilege-bypass suite and the "no alternative order path" source scan. |
 | CR-08 | **COMPLETE** | `docs/evidence/cr08_dashboard.txt` | Lineage from the journal (decision → evidence → risk → order states → fill → ledger), text/JSON/CSV exports, and a dashboard that is read-only and loopback-only **by construction**. Isolation is stated in the report facts, in an HTTP header on every response, and on the page itself. |
-| CR-09 | **PARTIAL** | `docs/evidence/cr09_projection.txt`, `docs/evidence/cr09_drift_monitoring.txt` | The journal→database projector covers orders, fills, positions, portfolio state, decisions and risk outcomes, verified against real PostgreSQL with idempotent replay, and drift monitoring with transition-based alerting and a measured alert rate is in place (`docs/evidence/cr09_drift_monitoring.txt`). Remaining: a supervised long-running process, alert routing, evidence-fact projection, long-duration paper/shadow runs, latency and P&L attribution, and the incident runbooks. |
+| CR-09 | **PARTIAL** | `docs/evidence/cr09_projection.txt`, `docs/evidence/cr09_drift_monitoring.txt`, `docs/evidence/cr09_metrics_runbooks.txt` | The journal→database projector covers orders, fills, positions, portfolio state, decisions and risk outcomes, verified against real PostgreSQL with idempotent replay, and drift monitoring with transition-based alerting and a measured alert rate is in place (`docs/evidence/cr09_drift_monitoring.txt`). Metrics (P&L attribution, step durations, activity counts) and eight incident runbooks are in place (`docs/evidence/cr09_metrics_runbooks.txt`). Remaining: a supervised long-running process, alert routing, evidence-fact projection, and long-duration paper/shadow runs (blocked on CR-03's grant, since OBSERVED latency and stability need a real session). |
 | CR-10 | **COMPLETE** | `docs/LIVE_READINESS.md`, `tests/unit/test_live_readiness.py` | The human-approved review checklist (10 preconditions, every one marked not done), the isolated-runtime plan with its two honest gaps, the remaining failure modes ranked, and the hard boundaries that survive future changes. Documentation only: it activates nothing, and a test asserts its code-checkable claims stay true. |
 
 ## Current test and verification state
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **621 passed** |
-| `pytest -q -m "not requires_db"` | **601 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **660 passed** |
+| `pytest -q -m "not requires_db"` | **640 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
-| `mypy` (strict) | Success, 90 source files |
+| `mypy` (strict) | Success, 91 source files |
 | `ruff check` / `format --check` | Clean |
 | `tools/tiger_reconcile.py` | `RECONCILED=true` against the live Tiger paper account |
 | `tigerquant drift` | Detects real drift (exit 1) and reports consistent after projection (exit 0) |
 | `tigerquant project` | 31/31 events, idempotent on replay |
 | `tigerquant report` | 6 decisions, 1 fill, lineage clean |
 | `tigerquant dashboard` | Loopback-only, read-only; 405 on POST, 404 on traversal |
+| `tigerquant metrics` | 6 decisions, 1 fill; durations labelled as simulated step sizes |
 
 ## External blockers (do not paper over these)
 

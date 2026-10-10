@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-09 long-duration runs, reports and runbooks
+Current CR: CR-05 ingestion connectors; CR-09 needs CR-03's grant for a long run
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -403,6 +403,40 @@ the data structure; "isolation shown distinctly" defines what must be impossible
 left unread bytes in the socket, so the connection reset and the client saw
 `ConnectionAbortedError` instead of the 405 the server had sent. The test that POSTs a *body* is
 what caught it.
+
+### 2026-10-10 — CR-09 part 3: measured metrics and incident runbooks
+
+Full evidence: `docs/evidence/cr09_metrics_runbooks.txt`.
+
+**The most important thing the metrics module does is refuse to mislead.** CR-09's gate says
+"latency", but the offline replay drives an injected `SimulatedClock`, so a duration from those
+timestamps is a **fixture step size** and says nothing about a real venue. So `LatencyReport`
+carries a `clock_source`, `is_observed` is a property derived from it, the label reads *"step
+duration (simulated clock) — NOT a latency measurement"*, and the default is the conservative one
+so a real measurement requires passing `SystemClock` deliberately.
+
+**The P&L attribution caught a real property of the event stream.** Its first run reported *does
+not reconcile*, and it was right. `PositionChanged` is emitted when a position *changes*,
+carrying the mark that applied then, while `LedgerMarked` keeps being emitted as the mark moves —
+so the last position snapshot is from an earlier instant than the final valuation, and the
+difference is unattributable from these events alone. Rather than hide it, the report names the
+`residual` and explains it, and `metrics` exits 1 when it exceeds a cent.
+
+A quieter bug came out of the same work: `sum_of_parts` summed the per-instrument breakdown, so a
+report carrying aggregates but no instrument rows returned `-commission` — confidently wrong. It
+now uses the aggregates, with a separate `breakdown_agrees` check, because a report can reconcile
+with the ledger while its own breakdown contradicts it.
+
+**Eight incident runbooks**, each in three parts: what you will see, what to do, and what NOT to
+do. Two matter most. RB-03 says explicitly *do not* regenerate the hash chain from the database,
+because the database was built *from* the journal and rebuilding it would launder a corruption
+into a consistent-looking history. RB-08 is not an incident at all — it is the boundary, and its
+instruction is to decline and point at `LIVE_READINESS.md`.
+
+The exit-code table is a contract, so it is checked: `test_runbooks.py` verifies every subcommand
+the runbooks name actually exists (read from the argparse parser, not a hardcoded list), that the
+drift runbook's quoted threshold and cadence match the configured policy, and that the cancel
+exemption RB-04 claims is true of `RiskState`.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
