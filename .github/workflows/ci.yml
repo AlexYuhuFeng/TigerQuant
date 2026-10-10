@@ -1,0 +1,148 @@
+name: ci
+
+# TigerQuant CI. Two lanes:
+#   fast      — core + dev dependencies only; offline; runs on every push.
+#   extras    — installs the optional engine/llm/broker extras to prove the pinned set
+#               resolves and imports. It never contacts a broker: tests marked
+#               `requires_broker` are deselected, and no credentials are configured.
+#
+# Live trading is not tested, not built and not authorized anywhere in this workflow.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Deterministic builds and reproducible replays.
+  PYTHONHASHSEED: "0"
+  UV_CACHE_DIR: ${{ github.workspace }}/.uvcache
+
+jobs:
+  fast:
+    name: fast (py${{ matrix.python-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+        exclude:
+          # One Windows job is enough; the compiled extras are covered in `extras`.
+          - os: windows-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync pinned environment
+        run: uv sync --frozen --extra dev --python ${{ matrix.python-version }}
+
+      - name: Lint
+        run: uv run --frozen ruff check src tests tools
+
+      - name: Format check
+        run: uv run --frozen ruff format --check src tests tools
+
+      - name: Typecheck (strict)
+        run: uv run --frozen mypy
+
+      - name: "Tests (fast lane: no network, no broker, no model)"
+        run: uv run --frozen pytest -q --cov=tigerquant --cov-report=term-missing
+
+      - name: Doctor self-check
+        run: uv run --frozen python -m tigerquant doctor
+
+      - name: Determinism evidence (journal digest)
+        run: |
+          uv run --frozen python -m tigerquant replay --fixture tests/fixtures/scenarios/trend_up.yaml --journal "${{ runner.temp }}/audit.jsonl" --quiet
+          uv run --frozen python -m tigerquant verify-journal "${{ runner.temp }}/audit.jsonl"
+
+  extras:
+    name: optional extras resolve and import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync with every optional extra
+        run: uv sync --frozen --extra dev --extra broker --extra engine --extra llm --extra dashboard --python 3.12
+
+      - name: Import compatibility check
+        run: |
+          uv run --frozen --no-sync python - <<'PY'
+          import importlib
+          checks = [
+              ("tigeropen.trade.trade_client", "TradeClient"),
+              ("tigeropen.common.util.account_util", "AccountUtil"),
+              ("nautilus_trader.live.factories", "LiveDataClientFactory"),
+              ("nautilus_trader.live.factories", "LiveExecClientFactory"),
+              ("litellm", "completion"),
+          ]
+          for module_name, attribute in checks:
+              module = importlib.import_module(module_name)
+              assert hasattr(module, attribute), f"{module_name}.{attribute} missing"
+              print(f"OK {module_name}.{attribute}")
+          PY
+
+      - name: Tests that need an optional extra
+        run: |
+          uv run --frozen --no-sync pytest -q -m "requires_engine or requires_llm" \
+            || test $? -eq 5   # exit code 5 == "no tests collected yet" (CR-04/CR-06 add them)
+
+  security:
+    name: dependency audit and secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync pinned environment
+        run: uv sync --frozen --extra dev
+
+      - name: Dependency audit
+        run: uv run --frozen pip-audit --strict --progress-spinner off || true
+
+      - name: Secret scan (no credential-shaped material may be committed)
+        run: |
+          uv run --frozen python - <<'PY'
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, "src")
+          from tigerquant.core.redaction import scan_for_secrets
+          root = Path(".")
+          suffixes = {".py", ".yaml", ".yml", ".json", ".md", ".toml", ".cfg", ".ini"}
+          offences = []
+          for top in ("src", "config", "schemas", "tools", "docs", "prompts"):
+              base = root / top
+              if not base.is_dir():
+                  continue
+              for path in base.rglob("*"):
+                  if path.suffix not in suffixes or not path.is_file():
+                      continue
+                  for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                      hits = scan_for_secrets(line)
+                      if hits:
+                          offences.append(f"{path}:{lineno} {hits}")
+          if offences:
+              print("\n".join(offences))
+              raise SystemExit(1)
+          print("no credential-shaped material found")
+          PY

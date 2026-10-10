@@ -1,0 +1,134 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tigerquant"
+version = "0.1.0"
+description = "Evidence-grounded, paper-first AI trading platform (TigerQuant)"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = { text = "Proprietary" }
+authors = [{ name = "TigerQuant Owner" }]
+dependencies = [
+  # Exact pins only. Transitive closure is frozen in uv.lock (ADR-0001).
+  "pydantic==2.14.0",
+  "jsonschema==4.26.0",
+  "PyYAML==6.0.3",
+  # Windows has no system IANA tz database; zoneinfo needs the tzdata wheel.
+  "tzdata==2026.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "pytest-cov==7.1.0",
+  "hypothesis==6.168.5",
+  "ruff==0.17.0",
+  "mypy==2.4.0",
+  "types-PyYAML==6.0.12.20250822",
+  "types-jsonschema==4.26.0.20261006",
+  "pip-audit==2.10.1",
+  "bandit==1.9.4",
+  "detect-secrets==1.5.0",
+]
+broker = ["tigeropen==3.8.0"]        # CR-02/CR-03
+engine = ["nautilus_trader==1.231.0"]  # CR-04
+llm = ["litellm==1.104.2"]            # CR-06
+dashboard = [                          # CR-08
+  "fastapi==0.143.0",
+  "uvicorn==0.54.0",
+  "jinja2==3.1.6",
+]
+
+[project.scripts]
+tigerquant = "tigerquant.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tigerquant"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# The cache provider writes under the system temp area, which the DSH workspace sandbox
+# may deny; the suite must not fail for that reason.
+addopts = "-ra --strict-markers --strict-config -p no:cacheprovider"
+asyncio_mode = "strict"
+markers = [
+  "fault: failure-injection tests",
+  "integration: multi-component integration tests",
+  "requires_broker: needs Tiger credentials (never run in CI fast lane)",
+  "requires_engine: needs nautilus_trader installed",
+  "requires_llm: needs a model provider",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/tigerquant"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "DTZ", "T20", "EM", "ISC",
+  "ICN", "LOG", "G", "PIE", "PT", "Q", "RET", "RSE", "SIM", "TID", "ARG",
+  "PTH", "ERA", "PL", "TRY", "FLY", "PERF", "FURB", "RUF", "S", "BLE", "T10",
+]
+ignore = [
+  "E501",    # line length handled by formatter
+  "TRY003",  # long messages in exceptions are intentional
+  "EM101", "EM102",  # exception message literals are fine
+  "PLR0913", # explicit constructors with many fields are intentional for events
+  "PLR2004", # magic values are documented inline in tests
+  "S101",    # asserts are the point of a test suite
+  "TID252",  # relative imports inside a package are acceptable
+  # Documented architecture decisions, not lint debt:
+  "PLC0415", # ADR-0001 §6 requires optional SDKs to be imported lazily
+  "N818",    # domain exception names (RiskDenied, LiveNotAuthorized) are deliberate
+  "ISC004",  # implicit string concatenation aids long, readable identifier sets
+  "RUF043",  # pytest.raises patterns are intentionally regexes
+  "PLR0911", "PLR0912",  # the risk checks and the projection are branchy by design
+  "PLR0917", # positional arguments in small value objects are clear
+  "ARG002",  # protocol methods must keep their parameter names
+  "PERF401", # explicit loops with side effects are clearer than comprehensions here
+  "SIM102", "SIM113",  # nested guards document denial reasons one at a time
+  "FURB171", # explicit membership sets read better than single-item tuples
+  "RUF059",  # unused unpacking in tests documents the fixture shape
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ARG001", "ARG002", "PLR0915", "SLF001", "DTZ001", "DTZ005"]
+"tools/**" = ["T201", "S310", "PLR2004", "BLE001", "PTH123"]
+"src/tigerquant/cli.py" = ["T201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tigerquant"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/tigerquant"]
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+disallow_any_unimported = false
+show_error_codes = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = false
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# Optional third-party SDKs are imported lazily inside adapters (ADR-0001 §6).
+module = ["tigeropen.*", "nautilus_trader.*", "litellm.*"]
+ignore_missing_imports = true

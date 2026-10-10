@@ -1,0 +1,43 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# --- Tooling caches (kept out of Git; local scratch only) ------------------
+.pytest_cache/
+.pytest-tmp/
+pytest-cache-files-*/
+tests/_tmp/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+.uvcache/
+.cache/
+
+# --- Local run output -----------------------------------------------------
+out/
+*.jsonl
+!tests/fixtures/**/*.jsonl
+!docs/evidence/**/*.jsonl
+
+# --- Secrets and local overrides (never commit) ---------------------------
+.env
+.env.*
+*.pem
+*.key
+secrets/
+config/local.yaml
+config/*.local.yaml
+
+# --- Editors / OS ---------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

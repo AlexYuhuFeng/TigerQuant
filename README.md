@@ -1,9 +1,51 @@
 # TigerQuant — DeepSeek Harness build starter
 
-TigerQuant is a proposed autonomous trading platform. This repository initially contains **design and agent instructions, not a functioning trader**. There is no enabled live order path.
+TigerQuant is an evidence-grounded, paper-first AI trading platform under construction. This
+repository contains design documents, agent instructions **and a working offline vertical slice**.
+There is no enabled live order path, and none can be created by a coding agent.
+
+## Current status (honest)
+
+| Milestone | State |
+|---|---|
+| CR-00 architecture, pinning, threat model | **complete** |
+| CR-01 offline vertical slice, CI, tests | **complete** — 223 tests, strict typing, deterministic replay |
+| CR-02/CR-03 Tiger paper integration | **BLOCKED** — no Tiger paper account exists in this environment |
+| CR-04…CR-10 | not started |
+
+**Implementation status: `SIMULATED`.** No external system has been contacted. The paper, engine
+and model integrations are pinned and lock-resolved but not yet exercised.
+
+## Try the offline slice
+
+```powershell
+$env:UV_CACHE_DIR="$env:TEMP\tq_uvcache"
+uv sync --frozen --extra dev
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m tigerquant replay --fixture tests/fixtures/scenarios/trend_up.yaml --journal out/audit.jsonl
+.\.venv\Scripts\python.exe -m tigerquant verify-journal out/audit.jsonl
+.\.venv\Scripts\python.exe -m tigerquant doctor
+```
+
+The replay drives the whole production path offline: deterministic market feed → point-in-time
+as-of view → evidence snapshot → decision contract → deterministic sizing → risk gateway → order
+intent state machine → fake broker → ledger → append-only hash-chained audit journal. Two runs
+produce a byte-identical journal.
+
+## Where to read next
+
+- `AGENTS.md` — binding invariants. Read before changing anything.
+- `docs/adr/` — the decisions that are expensive to reverse.
+- `docs/THREAT_MODEL.md`, `docs/COMPONENT_MAP.md` — assets, boundaries, component privileges.
+- `docs/DEPENDENCIES.md` — pinned versions and how to reproduce the environment.
+- `docs/PROGRESS.md` — durable state: what is done, what is verified, what is blocked.
+- `docs/WORK_QUEUE.md` — the backlog and its current status.
+- `docs/integrations/` — citation-backed vendor API notes for the pinned SDK versions.
 
 ## Mission
-Build a paper-first, evidence-grounded AI-driven trader on NautilusTrader, Tiger OpenAPI, and a provider-neutral LLM adapter (starting with `deepseek-flash`). Historical simulation, Tiger paper, shadow, and eventually explicitly authorized Tiger live operation must be segregated.
+Build a paper-first, evidence-grounded AI-driven trader on NautilusTrader, Tiger OpenAPI, and a
+provider-neutral LLM adapter (starting with `deepseek-flash`). Historical simulation, Tiger paper,
+shadow, and eventually explicitly authorized Tiger live operation must be segregated.
 
 ## Start with DSH
 1. Unzip this folder into a new Git repository and commit the baseline.

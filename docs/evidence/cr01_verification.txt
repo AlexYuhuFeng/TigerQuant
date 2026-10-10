@@ -1,0 +1,111 @@
+﻿TigerQuant CR-01 verification evidence
+Generated: 2026-10-10T10:12:24+08:00
+Host: Microsoft Windows NT 10.0.26300.0
+
+=== interpreter ===
+Python 3.14.7
+
+=== pinned dependency inventory (top-level) ===
+bandit==1.9.4
+detect-secrets==1.5.0
+hypothesis==6.168.5
+jsonschema==4.26.0
+mypy==2.4.0
+pydantic==2.14.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+PyYAML==6.0.3
+ruff==0.17.0
+tigerquant==0.1.0
+types-jsonschema==4.26.0.20261006
+types-PyYAML==6.0.12.20250822
+tzdata==2026.5
+
+=== ruff check ===
+$ python -m ruff check src tests tools
+All checks passed!
+[exit code: 0]
+
+=== ruff format --check ===
+$ python -m ruff format --check src tests tools
+71 files already formatted
+[exit code: 0]
+
+=== mypy (strict) ===
+$ python -m mypy
+Success: no issues found in 56 source files
+[exit code: 0]
+
+=== pytest (full offline suite) ===
+$ python -m pytest -q
+........................................................................ [ 32%]
+........................................................................ [ 64%]
+........................................................................ [ 96%]
+.......                                                                  [100%]
+223 passed in 5.14s
+[exit code: 0]
+
+=== tigerquant doctor ===
+$ python -m tigerquant doctor
+tigerquant 0.1.0 �� implementation status: SIMULATED
+modes:
+  BACKTEST  namespace=bt submit=False cancel=False live_authorized_submit=False requires_authorization=False
+  SHADOW    namespace=sh submit=False cancel=False live_authorized_submit=False requires_authorization=False
+  PAPER     namespace=pa submit=True cancel=True live_authorized_submit=True requires_authorization=True
+  LIVE      namespace=lv submit=False cancel=False live_authorized_submit=True requires_authorization=True
+registered event types: 20
+safety checks:
+  [PASS] determinism (no uuid4 / wall-clock calls outside core.clock): clean
+  [PASS] mode capabilities (no submission in BACKTEST/SHADOW, LIVE gated): clean
+  [PASS] no live enablement surface in source: clean
+  [PASS] implementation status is labelled: SIMULATED
+[exit code: 0]
+
+=== end-to-end replay (offline) ===
+$ python -m tigerquant replay --fixture tests/fixtures/scenarios/trend_up.yaml --journal docs/evidence/replays/run1.jsonl --report docs/evidence/replays/run1_report.json --quiet
+sha256:4ac8692a25263326238da249f437985d5434c39273c964ec3fe3a7664a98b745
+two independent runs, sha256 of the raw journal file:
+  run1.jsonl sha256=5ac9de744ae629f15e5c79a4289f7f60a4db39760431324cfd5899c60c6439d3
+  run2.jsonl sha256=5ac9de744ae629f15e5c79a4289f7f60a4db39760431324cfd5899c60c6439d3
+  identical: True
+
+$ python -m tigerquant verify-journal docs/evidence/replays/run1.jsonl
+OK: 31 record(s), head sha256:43ad3f90acdc80bf33f1f9eb3a0132b89f9d5b4bcb41c2d01fab0333a427f496
+[exit code: 0]
+
+=== replay report (run1) ===
+{
+  "bars_processed": 6,
+  "decisions_proposed": 6,
+  "decisions_rejected": 0,
+  "final_cash": "95179.48",
+  "final_equity": "100015.48",
+  "fixture_digest": "sha256:70fc0aa074c87bb45ea3001175559b4c55f6c72f9108003ed75c094bf711e0b5",
+  "implementation_status": "SIMULATED",
+  "initial_cash": "100000.00",
+  "journal_digest": "sha256:4ac8692a25263326238da249f437985d5434c39273c964ec3fe3a7664a98b745",
+  "journal_head_hash": "sha256:43ad3f90acdc80bf33f1f9eb3a0132b89f9d5b4bcb41c2d01fab0333a427f496",
+  "journal_records": 31,
+  "mode": "BACKTEST",
+  "notes": [
+    "SIMULATED: deterministic fake broker; no broker was contacted",
+    "policy: cr01-baseline",
+    "alerts: 0"
+  ],
+  "orders_filled": 1,
+  "orders_quarantined": 0,
+  "orders_rejected": 0,
+  "orders_submitted": 1,
+  "orders_unknown": 0,
+  "positions": {
+    "SPY": 8
+  },
+  "realized_pnl": "0.00",
+  "risk_denials": 0,
+  "scenario_id": "trend_up",
+  "snapshot_digest": "sha256:6387808029ebbff33dbc60190645588f5c2f12b65113a80636ae53794c8b4c18",
+  "strategies": [
+    "reference-momentum@reference-momentum-1.0.0"
+  ]
+}

@@ -1,0 +1,33 @@
+[
+  {
+    "error": "TimeoutError: The read operation timed out",
+    "package": "pydantic-core"
+  },
+  {
+    "cp312_win_wheel": false,
+    "cp314_win_wheel": false,
+    "latest": "1.104.2",
+    "package": "litellm",
+    "pure_py3_wheel": false,
+    "requires_python": "<3.15,>=3.10",
+    "sdist": true
+  },
+  {
+    "cp312_win_wheel": true,
+    "cp314_win_wheel": true,
+    "latest": "1.231.0",
+    "package": "nautilus_trader",
+    "pure_py3_wheel": false,
+    "requires_python": "<3.15,>=3.12",
+    "sdist": true
+  },
+  {
+    "cp312_win_wheel": false,
+    "cp314_win_wheel": false,
+    "latest": "3.8.0",
+    "package": "tigeropen",
+    "pure_py3_wheel": true,
+    "requires_python": ">=3.8",
+    "sdist": true
+  }
+]

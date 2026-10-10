@@ -1,0 +1,37 @@
+# SIMULATED deterministic scenario. The venue rejects the order; the system must record
+# the rejection and leave the ledger untouched.
+scenario_id: rejected_order
+description: Venue rejects the order; no fill, no position, clean failure.
+mode: BACKTEST
+start: "2026-03-02T14:40:00Z"
+interval: 1m
+initial_cash: "100000.00"
+universe: ["SPY"]
+max_fact_age_seconds: 900
+
+strategy:
+  kind: momentum
+  lookback: 3
+  entry_threshold_bps: "10"
+  exit_threshold_bps: "10"
+  target_weight: "0.05"
+
+risk:
+  gross_exposure_fraction: "0.50"
+  max_symbol_fraction: "0.10"
+  max_order_fraction: "0.10"
+  max_mark_age_seconds: 900
+  max_orders_per_cycle: 1
+
+broker:
+  fill_policy: reject
+  commission_per_share: "0.005"
+
+instruments:
+  SPY:
+    bars:
+      - {t: 0, o: "600.00", h: "600.50", l: "599.80", c: "600.00", v: 10000}
+      - {t: 1, o: "600.00", h: "601.00", l: "599.90", c: "600.80", v: 11000}
+      - {t: 2, o: "600.80", h: "602.00", l: "600.70", c: "601.60", v: 12000}
+      - {t: 3, o: "601.60", h: "603.00", l: "601.50", c: "602.50", v: 13000}
+      - {t: 4, o: "602.50", h: "604.00", l: "602.40", c: "603.50", v: 14000}
