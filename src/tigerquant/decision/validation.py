@@ -32,7 +32,14 @@ if TYPE_CHECKING:
     from tigerquant.evidence.snapshot import EvidenceSnapshot
     from tigerquant.evidence.store import EvidenceStore
 
-__all__ = ["DecisionContext", "DecisionValidator", "RecomputationResult"]
+__all__ = [
+    "DecisionContext",
+    "DecisionValidationError",
+    "DecisionValidator",
+    "RecomputationResult",
+    "fresh_enough",
+    "requires_evidence",
+]
 
 
 @dataclass(frozen=True, slots=True)

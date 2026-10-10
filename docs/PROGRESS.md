@@ -1,9 +1,10 @@
 # Durable progress state
 
 Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and tested;
-a real paper round trip is blocked on a write-scoped grant). CR-09 partial (projector and
-drift check verified against real PostgreSQL). CR-05 substantially delivered.
-Current CR: continue CR-09 (fills/positions projection, scheduling), CR-04, CR-06
+a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
+path and benchmark done; no live provider call). CR-09 partial (projector verified against
+real PostgreSQL). CR-05 substantially delivered.
+Current CR: CR-04 (NautilusTrader adapter), then CR-09 scheduling and CR-08
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -235,6 +236,41 @@ exactly the placeholder-that-appears-production-ready that AGENTS.md invariant 1
 status is now derived from observation: it upgrades only when the venue returns an order id, and
 a failed or timed-out submission does not upgrade it. Both behaviours are tested.
 
+### 2026-10-10 — CR-06 partial: provider-neutral model path and benchmark harness
+
+Full evidence: `docs/evidence/cr06_model_interface.txt`. Status `SIMULATED`: no provider has
+been called, because that needs an API key this project does not hold.
+
+- `decision/prompt.py` builds a **deterministic, versioned** prompt. Determinism is the point:
+  without it, "the model changed its mind" and "the prompt changed underneath it" are
+  indistinguishable in the journal. Untrusted content is fenced with a content hash, and fence
+  markers inside the content are defanged so it cannot break out of its region.
+- `decision/model.py` is the provider-neutral path. **Every failure mode returns a well-formed
+  `NO_TRADE`**: outage, timeout, latency over budget, unparseable prose, empty choices, a
+  non-mapping response, an action outside the schema, and a provider that answered from a
+  *different model version* than the one approved. A test asserts directly that no failure
+  construction ever yields `SET_TARGET`, `REDUCE` or `CLOSE`.
+- `decision/benchmark.py` scores a provider over a fixed case list, through the **same
+  `DecisionValidator` the pipeline uses**, so the benchmark cannot pass a decision production
+  would reject. Cases that propose a trade when they should abstain are reported as *safety
+  violations* rather than as a low score.
+
+**Three real problems this work found:**
+
+1. **The prompt told the model to emit actions the schema rejects.** The hint said
+   `"BUY" | "SELL"`, but `Action` is `NO_TRADE | HOLD | SET_TARGET | REDUCE | CLOSE`. Every
+   attempt to trade would have failed validation — a decision model that *looks* cautious while
+   actually being unable to answer. The test now iterates the enum so it cannot drift again.
+2. **A layering violation, caught by an existing boundary test.** `decision/model.py` imported
+   `litellm` directly. Two boundary tests failed, both correctly. The fix was to change the
+   design, not the test: the binding moved to `adapters/llm/`, and `decision/model.py` now
+   *requires* an injected transport. ADR-0009 says the decision layer defines the port and the
+   adapter implements it — which is what it now does.
+3. **The harness initially scored a correct abstention as a failure.** A raising transport
+   produces an abstention, which is correct behaviour, so the case should pass; the failing
+   case is a provider that lets an exception escape `propose()`. Both are now tested
+   separately, because they look identical from a distance and mean opposite things.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
@@ -301,5 +337,5 @@ Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-
    the projection tables, then schedule the drift check and alarm on it.
 2. **CR-03's last acceptance item is blocked on the owner**, not on code: a real paper round trip
    needs a write-scoped OAuth grant (`api.trade:write`).
-3. CR-04 (NautilusTrader adapter) and CR-06 (provider-neutral model service) are buildable offline.
+3. CR-04 (NautilusTrader adapter) is buildable offline.
 4. CR-05's remaining gap: news/filing ingestion connectors.

@@ -30,7 +30,7 @@ Last updated: 2026-10-10.
 | CR-03 | **PARTIAL — BLOCKED on a write-scoped grant** | `docs/evidence/cr03_execution_adapter.txt` | The guarded write adapter and all four safety gates exist and are tested against a fake SDK, including timeout→UNKNOWN with no retry, partial fills, and the `order.account` hazard. **No order has ever been submitted**, because the credential is deliberately read-only. Status is `SIMULATED`, not `PAPER_VERIFIED`. A write-scoped grant is an owner decision, not a coding task. |
 | CR-04 | READY | — | Buildable offline; `nautilus_trader==1.231.0` cp314 wheel confirmed, not yet installed |
 | CR-05 | **SUBSTANTIALLY DELIVERED** | `docs/evidence/cr05_database.txt`, `docs/adr/ADR-0013-database-architecture.md` | Calendar, source registry, per-category staleness, untrusted-text sandboxing, durable fact log, vintage-correct revisions, derivation lineage, and the containerised PostgreSQL layer are implemented and tested. Not marked complete: news/filing ingestion connectors do not exist yet. |
-| CR-06 | READY | interfaces frozen in CR-01 (`decision/provider.py`) | Offline provider + benchmark harness buildable without a live key |
+| CR-06 | **PARTIAL** | `docs/evidence/cr06_model_interface.txt` | Provider-neutral path, versioned prompt contract, failure handling (every failure abstains) and the benchmark harness are done and tested. No provider has been called: that needs an API key. Status is `SIMULATED`. |
 | CR-07 | **COMPLETE** | `docs/evidence/cr07_risk_controls.txt` | Session limits (turnover, daily loss, drawdown, rolling order rate), the risk-metrics accumulator, and an independent watchdog whose only power is to stop. Includes the privilege-bypass suite and the "no alternative order path" source scan. |
 | CR-08 | PENDING | — | Depends on CR-05/CR-07 state to display |
 | CR-09 | **PARTIAL** | `docs/evidence/cr09_projection.txt` | The journal→database projector covers orders, fills, positions, portfolio state, decisions and risk outcomes, verified against real PostgreSQL with idempotent replay. Remaining: scheduling and alerting on drift, evidence-fact projection, and the watchdog hook. The long-duration harness and runbooks are not started. |
@@ -40,10 +40,10 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **480 passed** |
-| `pytest -q -m "not requires_db"` | **460 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **519 passed** |
+| `pytest -q -m "not requires_db"` | **499 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
-| `mypy` (strict) | Success, 77 source files |
+| `mypy` (strict) | Success, 82 source files |
 | `ruff check` / `format --check` | Clean |
 | `tools/tiger_reconcile.py` | `RECONCILED=true` against the live Tiger paper account |
 

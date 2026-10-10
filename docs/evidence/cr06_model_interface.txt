@@ -1,0 +1,127 @@
+TigerQuant CR-06 evidence - provider-neutral model interface and decision contract
+Generated: see the git commit this file was added in
+
+Implementation status: SIMULATED. No model provider has been called.
+  The provider-neutral path, the prompt contract, the failure handling and the benchmark
+  harness all exist and are tested. A live provider call needs an API key, which this project
+  does not hold and must not hold in a repository or a test. Every test injects a transport.
+
+===========================================================================
+1. Gate: "Schema+evidence checks; fabricated facts rejected; NO_TRADE available;
+          model/provider benchmarks"
+===========================================================================
+  [x] schema checks run on model output        the benchmark validates through the SAME
+                                               DecisionValidator the pipeline uses
+  [x] evidence checks                          citations are checked against the snapshot
+  [x] fabricated facts rejected                tested: citing fact-99 fails the case
+  [x] NO_TRADE available                       it is the answer to EVERY failure mode
+  [x] model/provider benchmarks                decision/benchmark.py
+  [ ] a live provider call                     NOT DONE - needs an API key (see limitations)
+
+===========================================================================
+2. The property that matters: no failure mode produces a trade
+===========================================================================
+Every way a model can fail ends in a well-formed NO_TRADE decision document, never in a
+bypass and never in an exception escaping into the pipeline:
+
+  outage (ConnectionError)            -> NO_TRADE, MODEL_UNAVAILABLE
+  timeout (TimeoutError)              -> NO_TRADE
+  latency over budget                 -> NO_TRADE, "exceeded the budget"
+  unparseable prose output            -> NO_TRADE
+  empty choices list                  -> NO_TRADE
+  a non-mapping response              -> NO_TRADE
+  action outside the schema ("BUY")   -> NO_TRADE, MODEL_OUTPUT_INVALID
+  provider answered from a DIFFERENT
+    model version than approved       -> NO_TRADE, MODEL_VERSION_UNPINNED
+
+test_no_failure_ever_produces_a_trade asserts the invariant directly: across all five
+failure constructions, the returned action is never SET_TARGET, REDUCE or CLOSE.
+
+A changed provider version is treated as a hard stop rather than accepted. A model that
+silently upgrades underneath the system is a different system, and continuing would make the
+recorded model_version a lie.
+
+===========================================================================
+3. Three genuine problems this work found
+===========================================================================
+PROBLEM 1 - the prompt told the model to emit actions the schema rejects.
+  The schema hint read:  "action": "BUY" | "SELL" | "HOLD" | "NO_TRADE"
+  The Action enum is:    NO_TRADE | HOLD | SET_TARGET | REDUCE | CLOSE
+  BUY and SELL do not exist. Every attempt to trade would have failed schema validation, so
+  the prompt could only ever abstain - a decision model that appears cautious while actually
+  being unable to answer. The prompt now names the real members, and
+  test_the_prompt_names_the_real_schema_actions iterates the enum so this cannot drift again.
+
+PROBLEM 2 - a layering violation, caught by an existing boundary test.
+  The first version of decision/model.py imported litellm directly. Two boundary tests
+  failed: optional SDKs may only be imported inside adapters/, and L1 may not import L3.
+  Both were right. The fix was not to relax the test but to fix the design:
+    * the LiteLLM binding moved to adapters/llm/litellm_transport.py;
+    * decision/model.py now REQUIRES an injected transport callable and knows nothing about
+      any vendor, which is what ADR-0009 says the decision layer should look like;
+    * the composition root (pipeline/cli) is where the two get wired together.
+  A default transport was deliberately removed rather than kept as a fallback: a default
+  would let an unconfigured system silently try to call something.
+
+PROBLEM 3 - the harness initially scored a correct abstention as a failure.
+  A transport that raises produces an abstention, which is CORRECT provider behaviour, so the
+  case should pass. The failing case is a provider that lets an exception escape propose().
+  Both behaviours are now tested separately, because they look identical from a distance and
+  mean opposite things.
+
+===========================================================================
+4. What keeps injected instructions from becoming trades
+===========================================================================
+Untrusted content is fenced with an explicit marker and a content hash, and any fence marker
+appearing inside the content is defanged so the content cannot break out of its region
+(tested: exactly one opening and one closing marker survive).
+
+That is mitigation. The actual defence is elsewhere and is why this is not a prompt-engineering
+problem: a decision that cites a fact which does not exist is rejected; a decision whose
+numbers do not recompute is rejected; a decision whose action is not in the schema is
+rejected. None of those checks reads the prose.
+
+The prompt also states that the numbers it is shown are context only, and that the system
+recomputes position size, buying power, costs and exposure itself (AGENTS.md invariant 5).
+
+===========================================================================
+5. No tool boundary exists to abuse (acceptance gate 2)
+===========================================================================
+DecisionRequest carries no broker handle, no tool registry and no credentials. The model
+provider imports nothing from execution/ or adapters/, and the prompt states that it has no
+tools and no network access. Litellm is called with messages only - no `tools=` and no
+`functions=` parameter exists anywhere in the transport.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+519 passed
+
+$ python -m pytest tests/unit/test_decision_model.py -q
+39 passed
+
+$ python -m pytest tests/unit/test_import_boundaries.py -q
+6 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 82 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. No provider has been called. There is no API key in this environment and there will not
+   be one in the repository. The status is SIMULATED and the benchmark report exists to be
+   filled in by whoever holds a key.
+2. The benchmark's case fixtures are constructed in tests, not shipped as a reusable suite.
+   A real provider qualification run should have a committed case corpus.
+3. Cost accounting is not implemented: token usage is captured from the response but not
+   priced or budgeted.
+4. No streaming and no cancellation. A call is synchronous and bounded by one timeout.
+5. Prompt-injection detection exists in evidence/text.py for ingested content; this module
+   relies on fencing plus downstream rejection rather than re-scanning the model's output for
+   injection markers. The model's output is validated structurally, which is the stronger
+   check, but a scan would add defence in depth.
