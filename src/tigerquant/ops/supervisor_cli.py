@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tigerquant.core.enums import Mode
+from tigerquant.db.identity import declare_mode, verify_identity
 from tigerquant.db.reconnect import ReconnectingRepository
 from tigerquant.ops.alerts import AlertRouter
 from tigerquant.ops.supervisor import (
@@ -274,6 +275,27 @@ def _select_repository(
             file=sys.stderr,
         )
         return None, None, 2
+    # ASSERT the database is the one this mode refers to. Without this, passing the PAPER DSN
+    # while running --mode BACKTEST compares an empty paper database against a backtest journal,
+    # finds the expected divergence, and reports a clean run against the WRONG database. Nothing
+    # notices, because a database with no rows looks exactly like a database with no rows.
+    expected = Mode(args.mode)
+    verdict = verify_identity(
+        connection,
+        expected,
+        allow_undeclared=getattr(args, "allow_undeclared_database", False),
+    )
+    if verdict.refused and getattr(args, "declare_mode", False):
+        # Declaring is the operator's explicit act, never automatic: a tool that stamped whatever
+        # mode it was told to would make the guard agree with any mistake.
+        declared = declare_mode(connection, expected, declared_by="tigerquant supervise")
+        print(f"declared this database as {declared.mode}", file=sys.stderr)
+        verdict = verify_identity(connection, expected)
+
+    if verdict.refused:
+        print(f"refusing to use this database: {verdict.detail}", file=sys.stderr)
+        return None, None, 2
+
     return connection, proxy, None
 
 
@@ -351,6 +373,23 @@ def supervise_parser(sub: object) -> None:
         type=float,
         default=60.0,
         help="ceiling on the backoff delay, so a long outage does not produce retries hours apart",
+    )
+    supervise.add_argument(
+        "--declare-mode",
+        action="store_true",
+        help=(
+            "record this database's mode if it has none. Refused if it already declares a "
+            "DIFFERENT mode, because every row in it was written under the old assumption."
+        ),
+    )
+    supervise.add_argument(
+        "--allow-undeclared-database",
+        action="store_true",
+        help=(
+            "use a database that does not declare its mode, on the operator's word. Does NOT "
+            "extend to a MISMATCH: connecting to a database declared as another mode is refused "
+            "either way."
+        ),
     )
     supervise.add_argument("--no-alerts", action="store_true", help="run without routing alerts")
     supervise.add_argument("--alert-log", type=Path, default=None, help="file sink for alerts")

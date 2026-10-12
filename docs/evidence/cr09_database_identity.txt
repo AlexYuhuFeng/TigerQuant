@@ -1,0 +1,111 @@
+TigerQuant CR-09 evidence (part 16) - the database says which mode it serves
+Generated: see the git commit this file was added in
+
+Closes the limitation recorded since part 13: "passing a PAPER DSN while running --mode BACKTEST
+would reconcile the WRONG database and be reported as consistent."
+
+===========================================================================
+1. THE DEFECT IS A FALSE NEGATIVE, which is why it outranked everything else left
+===========================================================================
+Every mode has its own database (ADR-0013 §2) and a DSN is just a string. Passing the PAPER DSN
+while running `--mode BACKTEST`:
+
+  * connected to the paper database,
+  * compared an EMPTY paper database against a backtest journal,
+  * found the expected divergence,
+  * and reported a clean run -- against the WRONG database.
+
+NOTHING NOTICED. **A database with no rows looks exactly like a database with no rows.** And the
+failure mode is the dangerous direction: it reports health it has not checked, which is the same
+class of defect as the supervisor falling back to an in-memory repository.
+
+Observed before the fix: `--mode BACKTEST` against `tq_backtest` was indistinguishable from
+`--mode PAPER` against it. Observed after:
+
+    $ tigerquant supervise out/id/j.jsonl --dsn .../tq_backtest --mode PAPER
+    refusing to use this database: this database declares itself 'BACKTEST' but 'PAPER' was
+    expected (declared by probe at 2026-10-12 01:20:57+00:00). Every mode has its own database,
+    so this is the wrong one to be reconciling against.                        (exit 2)
+
+===========================================================================
+2. Why this does NOT contradict ADR-0013 §2
+===========================================================================
+ADR-0013 says the database boundary IS the isolation mechanism, and that storing the mode as a
+column would invite a `WHERE mode = ...` filter a future query could forget. That reasoning is
+correct and this change does not weaken it:
+
+  * the mode is still NOT on any row. No query filters by it, and none should.
+  * `database_identity` is a SINGLE ROW DESCRIBING THE DATABASE ITSELF, so a process can assert
+    that the database it connected to is the one it meant to.
+
+It is a guard against misconfiguration, not a substitute for the boundary. The `CHECK (id)` primary
+key makes "at most one row" structural rather than conventional.
+
+===========================================================================
+3. Deny by default, in three places
+===========================================================================
+**Undeclared is REFUSED, not assumed to match.** An EMPTY identity table means the database has
+not said what it is, and "I cannot tell what this is" is not "this is what I expected". An
+operator can pass `--allow-undeclared-database` to accept an unverifiable database deliberately,
+and the verdict then says plainly that it **cannot be checked** rather than implying it was.
+
+**A mismatch is refused EVEN WITH that flag.** The escape hatch is for an unverifiable database,
+never for a demonstrably wrong one -- a mismatch is the case where rows get written under the
+wrong assumption, which is the thing worth stopping.
+
+**Declaring is the operator's explicit act.** `--declare-mode` stamps it; nothing does so
+automatically, because a tool that stamped whatever mode it was told to would make the guard agree
+with any mistake. And re-declaring a DIFFERENT mode is REFUSED: a database whose mode silently
+changed is worse than one that refused to start, because every row in it was written under the old
+assumption and becomes unattributable.
+
+===========================================================================
+4. A test caught unreachable code in my own implementation
+===========================================================================
+`verify_identity` has an "unreadable" branch, for a database that cannot say what it is because
+the READ failed rather than because the table is empty. The first `read_identity` caught EVERY
+exception and returned None, so a connection reset was reported as "undeclared" and the
+"unreadable" branch **could never run**.
+
+That is a status claiming a behaviour it cannot have -- the same class of mistake as the
+`_INVARIANTS` list that named checks nobody performed. Fixed by distinguishing the two: only
+SQLSTATE 42P01 (undefined table) means undeclared, and anything else propagates so the caller can
+report it. A false negative there reports an undeclared database as unreadable, which errs toward
+REFUSING -- the right direction, and stated in the docstring.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+982 passed
+
+$ python -m pytest tests/unit/test_db_identity.py -q
+23 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 101 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **ONLY `supervise` CHECKS THE IDENTITY.** `tigerquant drift` and `tigerquant project` still
+   take a DSN and a mode without asserting they agree, so the same defect remains reachable
+   through those commands. This is the most important remaining gap and it is a wiring job.
+2. The identity is recorded per DATABASE, not per schema or per role. A database reachable under
+   two roles is one identity.
+3. The migration creates an EMPTY table, so every existing database is undeclared until someone
+   declares it. That is deliberate -- SQL cannot know which mode a database is for -- but it means
+   the guard is inert until the operator runs `--declare-mode` once.
+4. `_is_undefined_table` falls back to a message check when SQLSTATE is unavailable, and a driver
+   with different wording would report undeclared as unreadable. Both refuse, so the failure mode
+   is a confusing message rather than an unsafe pass.
+5. The declaration cannot be CLEARED through any command. That is deliberate, but it means a
+   database declared in error can only be fixed outside this tool.
+6. Nothing checks the identity on RECONNECT. The guard runs once at startup; a reconnect that
+   landed on a different database would not be caught.

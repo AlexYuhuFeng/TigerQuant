@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: mode-to-role validation; CR-03 awaits the owner's consent
+Current CR: the identity check on drift and project; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -1002,6 +1002,44 @@ still reported before the loop begins.
 
 `reconnects` is reported on the command line, because "it recovered" and "it never actually
 dropped" are different claims.
+
+### 2026-10-12 - CR-09 part 16: the database says which mode it serves
+
+Full evidence: `docs/evidence/cr09_database_identity.txt`. New `db/identity.py` + migration, 23 tests.
+
+**The defect was a FALSE NEGATIVE, which is why it outranked everything else left.** Every mode has
+its own database and a DSN is just a string, so passing the PAPER DSN while running
+`--mode BACKTEST` connected to the paper database, compared an EMPTY paper database against a
+backtest journal, found the expected divergence, and **reported a clean run against the wrong
+database**. Nothing noticed -- **a database with no rows looks exactly like a database with no
+rows** -- and the failure mode is the dangerous direction: reporting health it has not checked.
+
+Now:
+
+```
+$ tigerquant supervise ... --mode PAPER          # against the BACKTEST database
+refusing to use this database: this database declares itself 'BACKTEST' but 'PAPER' was expected
+```
+
+**Why this does not contradict ADR-0013 §2.** The mode is still NOT on any row and no query filters
+by it; the database boundary remains the isolation mechanism. `database_identity` is a SINGLE ROW
+DESCRIBING THE DATABASE ITSELF, so a process can assert it connected to the right one. A guard
+against misconfiguration, not a substitute for the boundary. The `CHECK (id)` primary key makes
+"at most one row" structural.
+
+**Deny by default in three places:** undeclared is REFUSED rather than assumed to match (and the
+escape-hatch verdict says plainly that the database *cannot be checked*); a **mismatch is refused
+even with that flag**, since the escape hatch is for an unverifiable database and never for a
+demonstrably wrong one; and **declaring is the operator's explicit act**, because a tool that
+stamped whatever mode it was told to would make the guard agree with any mistake. Re-declaring a
+different mode is refused outright -- a database whose mode silently changed is worse than one that
+refused to start.
+
+**A test caught unreachable code in my own implementation.** `verify_identity` has an "unreadable"
+branch for a read that failed; the first `read_identity` caught EVERY exception and returned None,
+so that branch **could never run** and a connection reset was reported as "undeclared". The same
+class of mistake as the `_INVARIANTS` list naming checks nobody performed. Fixed by distinguishing
+SQLSTATE 42P01 from a real failure.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
