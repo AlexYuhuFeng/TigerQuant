@@ -1,0 +1,100 @@
+TigerQuant CR-05 evidence - a fact's epistemic kind is derived from its source
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. The gap
+===========================================================================
+`IngestionPipeline._to_fact` hardcoded the epistemic kind for every ingested document:
+
+    # ATTRIBUTED_CLAIM, not OBSERVED. A news article is somebody's assertion; this
+    # system did not observe it and must not label it as though it had. That
+    # distinction is the whole point of an evidence-grounded trader.
+    kind=FactKind.ATTRIBUTED_CLAIM,
+
+**That reasoning is CORRECT FOR NEWS and wrong for everything else.** A regulatory filing ingested
+through the same pipeline would be labelled a mere claim.
+
+Worse, the distinction had been anticipated and then not built: `SourceKind.OFFICIAL_FILING` already
+existed in the enum. **Nothing produced it and nothing honoured it.** A half-built thing that reads
+as complete, which is the class of defect this project's own evidence rules are aimed at.
+
+===========================================================================
+2. Why it matters
+===========================================================================
+The axis is PRIMARY versus SECONDARY, not true versus false. A filing and a wire story can report
+the same number and are still different evidence: one is the document, the other is somebody's
+account of it. **Collapsing them lets a secondary report carry a primary document's weight**, which
+is the failure AGENTS.md invariant 4 exists to prevent.
+
+===========================================================================
+3. The fix: one mapping, and a refusal for anything unlisted
+===========================================================================
+The deeper problem was that the mapping was INLINED as a single literal, so there was nowhere to
+express a second case. It now lives in `_SOURCE_KIND_TO_FACT_KIND`:
+
+    OFFICIAL_FILING  -> OBSERVED           the document itself
+    MARKET_DATA      -> OBSERVED           read directly from a feed
+    BROKER           -> OBSERVED           account state the broker reported
+    NEWS_WIRE        -> ATTRIBUTED_CLAIM   somebody's assertion
+    SYNTHETIC        -> ATTRIBUTED_CLAIM   not observed by this system, same reason
+    DERIVED          -> DERIVED            computed here from other facts
+
+`fact_kind_for()` REFUSES an unmapped kind rather than defaulting. A default would be wrong in one
+of two directions -- promoting a claim to an observation, or demoting a primary document to a claim
+-- and **nothing downstream could detect either, because the label IS the evidence.**
+
+===========================================================================
+4. A test that caught a design question
+===========================================================================
+Three of my first thirteen tests failed, because they passed a bare string to `fact_kind_for` and
+got an `AttributeError` from the error message rather than the `ConfigurationError` under test.
+
+The failure exposed something better than a test bug: **every current `SourceKind` IS mapped**, so
+the refusal branch is unreachable through the enum today. That is not dead code -- it is defence
+against the NEXT kind added without a mapping -- but it has to be tested as such. The tests now
+remove an entry from the map with `monkeypatch` and assert the refusal, and a separate test asserts
+that no CURRENT kind is unmapped.
+
+Testing it by passing a string would have exercised a different path and called it coverage.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+1082 passed
+
+$ python -m pytest tests/unit/test_fact_kind_mapping.py -q
+13 passed
+
+$ python -m tigerquant gates
+critical test cases: 14/16 proven, 2 partial, 0 unproven
+documented count [OK] pytest -q: claims 1082, actual 1082
+documented count [OK] pytest -q -m "not requires_db": claims 1062, actual 1062
+documented count [OK] pytest -q -m requires_db: claims 20, actual 20
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success. No issues found in 102 source files
+
+Worth noting the count check earned its place in this very round: adding these tests made the
+documented counts stale, and `gates` said so before I noticed.
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **THE FILING CONNECTOR ITSELF IS NOT BUILT.** This round fixed the mapping that a filing
+   connector needs, and there is still no connector producing `OFFICIAL_FILING` documents. The
+   mapping is now correct and unused for that kind. This is the remaining CR-05 gap and it is
+   a wiring job on top of what is now in place.
+2. `OFFICIAL_FILING -> OBSERVED` is a JUDGEMENT, not a fact. A filing is a primary document, but
+   "observed" also carries "this system saw it directly", and a filing retrieved through a
+   third-party aggregator is one step removed. If filings are ever ingested that way, this entry
+   needs revisiting rather than inheriting.
+3. The refusal is unreachable through today's enum, so its only exercise is the monkeypatched test
+   above. A future addition without a mapping would hit it in production first, which is the
+   intended behaviour but not a scenario any test can reach naturally.
+4. `Source.reliability` is NOT consulted by the mapping. An `UNVERIFIED` source of a primary kind
+   still produces `OBSERVED`. The two axes -- what kind of thing, and how much to trust it -- are
+   independent, and only the first is now expressed.

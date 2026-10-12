@@ -36,6 +36,7 @@ from tigerquant.core.clock import ensure_utc
 from tigerquant.core.enums import ReasonCode
 from tigerquant.core.errors import ConfigurationError, EvidenceError
 from tigerquant.evidence.facts import Fact, FactKind, fact_id_for
+from tigerquant.evidence.sources import SourceKind
 from tigerquant.evidence.text import sanitise, scan_for_injection
 
 if TYPE_CHECKING:
@@ -79,6 +80,52 @@ class RawDocument:
 
     def describe(self) -> str:
         return f"{self.source_id}:{self.external_id} ({self.published_at.isoformat()})"
+
+
+#: Which EPISTEMIC kind a fact carries, given what kind of source produced it.
+#:
+#: The axis is PRIMARY versus SECONDARY, not true versus false. A filing and a wire story can
+#: report the same number and are still different evidence: one is the document, the other is
+#: somebody's account of it. Collapsing them lets a secondary report carry a primary document's
+#: weight, which is the failure invariant 4 exists to prevent.
+#:
+#: `SYNTHETIC` maps to ATTRIBUTED_CLAIM because a fixture is also something this system did not
+#: observe. The axis is "did we observe this", and a synthetic document fails it the same way a
+#: news report does.
+_SOURCE_KIND_TO_FACT_KIND: dict[SourceKind, FactKind] = {
+    # The document itself. The authoritative record of the event it describes.
+    SourceKind.OFFICIAL_FILING: FactKind.OBSERVED,
+    # Prices and quotes we read directly from a venue or feed.
+    SourceKind.MARKET_DATA: FactKind.OBSERVED,
+    # Account state the broker reported to us.
+    SourceKind.BROKER: FactKind.OBSERVED,
+    # Somebody's assertion, which is what a wire story is.
+    SourceKind.NEWS_WIRE: FactKind.ATTRIBUTED_CLAIM,
+    # Not observed by this system, for the same reason a wire story is not.
+    SourceKind.SYNTHETIC: FactKind.ATTRIBUTED_CLAIM,
+    # Computed by this system from other facts, so derived rather than observed.
+    SourceKind.DERIVED: FactKind.DERIVED,
+}
+
+
+def fact_kind_for(source_kind: SourceKind) -> FactKind:
+    """The epistemic kind a fact from this source carries.
+
+    REFUSES an unmapped kind rather than defaulting. A default would be wrong in one of two
+    directions -- either promoting a claim to an observation or demoting a primary document to a
+    claim -- and nothing downstream could detect either, because the label IS the evidence.
+    """
+    try:
+        return _SOURCE_KIND_TO_FACT_KIND[source_kind]
+    except KeyError as exc:
+        mapped = ", ".join(sorted(kind.name for kind in _SOURCE_KIND_TO_FACT_KIND))
+        msg = (
+            f"source kind {source_kind.name!r} has no fact kind. Add it to "
+            f"_SOURCE_KIND_TO_FACT_KIND with a reason; mapped so far: {mapped}. Refusing rather "
+            "than defaulting, because guessing mislabels the evidence and nothing downstream "
+            "could tell."
+        )
+        raise ConfigurationError(msg) from exc
 
 
 @runtime_checkable
@@ -335,10 +382,11 @@ class IngestionPipeline:
                 event_time=published,
                 content_hash=content_hash,
             ),
-            # ATTRIBUTED_CLAIM, not OBSERVED. A news article is somebody's assertion; this
-            # system did not observe it and must not label it as though it had. That
-            # distinction is the whole point of an evidence-grounded trader.
-            kind=FactKind.ATTRIBUTED_CLAIM,
+            # DERIVED FROM THE SOURCE, not hardcoded. A wire story is somebody's assertion and
+            # a filing is the document itself; the two must not carry the same label. This used
+            # to be a literal ATTRIBUTED_CLAIM with a comment about news, which was right for
+            # news and silently wrong for every other kind of source.
+            kind=fact_kind_for(source.kind),
             category=category,
             instrument=None,
             # event_time cannot be later than available_at, and the Fact model enforces it --

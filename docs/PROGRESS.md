@@ -1192,6 +1192,42 @@ text rather than on underlying data.
 `ok: False, STALE DOCUMENTED COUNTS: 1`. And a missing record fails too (`actual -1`), rather than
 defaulting to success.
 
+### 2026-10-12 - CR-05: a fact's epistemic kind is DERIVED from its source
+
+Full evidence: `docs/evidence/cr05_fact_kind_mapping.txt`. 13 tests.
+
+**The gap.** `_to_fact` hardcoded `kind=FactKind.ATTRIBUTED_CLAIM` for every ingested document, with
+a comment explaining that a news article is somebody's assertion. **That reasoning is correct for
+news and wrong for everything else** -- a regulatory filing ingested through the same pipeline would
+be labelled a mere claim.
+
+Worse, the distinction had been **anticipated and then not built**: `SourceKind.OFFICIAL_FILING`
+already existed in the enum. Nothing produced it and nothing honoured it. A half-built thing that
+reads as complete -- the class of defect this project's own rules are aimed at.
+
+**The axis is PRIMARY versus SECONDARY, not true versus false.** A filing and a wire story can report
+the same number and are still different evidence. Collapsing them lets a secondary report carry a
+primary document's weight, which is what invariant 4 exists to prevent.
+
+**The deeper problem was that the mapping was INLINED as a single literal**, so there was nowhere to
+express a second case. It now lives in `_SOURCE_KIND_TO_FACT_KIND`, and `fact_kind_for()` **REFUSES**
+an unmapped kind rather than defaulting -- a default would be wrong in one of two directions, and
+**nothing downstream could detect either, because the label IS the evidence.**
+
+**A test that caught a better question than a bug.** Three of my first thirteen tests failed, passing
+a bare string and getting an `AttributeError` from the error message. The failure exposed that
+**every current `SourceKind` IS mapped**, so the refusal is unreachable through the enum today. That
+is not dead code -- it is defence against the NEXT kind added -- but it has to be tested as such. The
+tests now remove a mapping via `monkeypatch` and assert the refusal, plus a separate test that no
+current kind is unmapped. Testing it with a string would have exercised a different path and called
+it coverage.
+
+**The count check earned its place this round**: adding these tests made the documented counts stale,
+and `gates` said so before I noticed.
+
+**Not built, and named as such:** there is still no connector producing `OFFICIAL_FILING` documents.
+This round fixed the mapping a filing connector needs. That remains the CR-05 gap.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
