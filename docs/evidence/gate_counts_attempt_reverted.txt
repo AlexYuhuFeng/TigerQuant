@@ -1,0 +1,77 @@
+TigerQuant note - a failed attempt, reverted, and what it established
+Generated: see the git commit this file was added in
+
+This round produced NO feature. I attempted one, it did not work, and I reverted it rather than
+shipping it half-working. Recording that plainly, because a round with nothing to show is a fact
+about the work and not something to dress up.
+
+===========================================================================
+1. What I tried
+===========================================================================
+Close the stale-count gap found last round: `docs/WORK_QUEUE.md` had read "731 passed" for several
+rounds because status updates are read-modify-write scripts over a shared document. The plan was for
+`tigerquant gates` to compare the documented counts against a real collection.
+
+===========================================================================
+2. What happened
+===========================================================================
+**Spawning a child pytest process does not complete in this environment.** The first version called
+`subprocess.run([..., "pytest", "--collect-only", ...])` with `capture_output=True`. It hung.
+
+I tested the obvious alternative -- redirecting the child's stdout to a FILE instead of a pipe --
+and **that hung too.** So this is not the documented piped-stdio boundary; subprocess execution
+itself does not complete here. I stopped probing at that point rather than trying more variations,
+because the guidance is to restructure rather than retry.
+
+**The restructuring had a real bug of its own.** I moved the counts to a `pytest_collection_finish`
+hook in `tests/conftest.py`, so the numbers would come from the run that actually happened -- a
+better fact than a hypothetical collection. It produced:
+
+    total          1045      (the run collected 1065)
+    requires_db       0      (there are 20)
+    not_requires_db 1045
+
+`requires_db` was absent from `item.iter_markers()` entirely, so all three documented numbers were
+wrong in different ways. Eight of my own new tests failed on the discrepancy.
+
+===========================================================================
+3. What I did about it
+===========================================================================
+**Reverted.** `src/tigerquant/ops/gates.py`, `tests/conftest.py` and `src/tigerquant/cli.py` went
+back to the committed state, and the new test file was deleted. The suite is green at 1044 again.
+
+**A half-working gate is worse than no gate.** A count check that reports stale numbers when they
+are correct would be ignored within a week, and then it would be ignored on the day it was right.
+Last round's `gates` -- which verifies that mapped tests EXIST -- is unaffected and still passing.
+
+===========================================================================
+4. What it established, which is worth keeping
+===========================================================================
+**Subprocess execution does not complete in this environment.** Confirmed twice, with pipes and
+with file redirection. Any future design that shells out to pytest, git or another interpreter from
+inside a Python process should assume it will hang, and use an in-process API or a file written by
+the process that already ran.
+
+**The documented counts are hand-maintained and CAN rot.** That was true before this round and it is
+still true. `gates` verifies the sixteen critical test cases; it does not verify the numbers in the
+status table. This is now a stated limitation rather than an assumed capability.
+
+**A cleaner design exists and was not built.** `gates` could accept the count as an injected value
+and the test suite -- which KNOWS what it collected -- could supply it. That removes the subprocess
+entirely. It needs the marker accounting fixed first, which is where the hook failed.
+
+===========================================================================
+5. Workspace hygiene, also from this round
+===========================================================================
+Seventy-two stray `tmp*` FILES had accumulated in the repository root, left by my own ad-hoc probes.
+They are removed. `.gitignore` already lists `tmp*/`, which matches DIRECTORIES, so bare files named
+`tmpXXXXXXXX` were never covered -- a pattern that looked like protection and was not.
+
+===========================================================================
+6. State at the end of this round
+===========================================================================
+  tests   1044 passed
+  mypy    clean, 102 source files
+  ruff    clean
+  doctor  4/4 safety checks
+  git     clean, nothing reverted-but-uncommitted

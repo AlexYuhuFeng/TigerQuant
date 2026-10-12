@@ -43,9 +43,13 @@ config/*.local.yaml
 Thumbs.db
 desktop.ini
 
-# Temp directories created by ad-hoc probes. A tool that writes to tempfile.mkdtemp()
-# under the repo root must never be committable.
-tmp*/
+# Temp artefacts created by ad-hoc probes. A tool that writes to tempfile.mkdtemp() under the
+# repo root must never be committable.
+#
+# BOTH patterns are needed. The trailing slash matches only DIRECTORIES, so 72 stray FILES named
+# tmpXXXXXXXX sat untracked in the root -- a pattern that looked like protection and was not.
+tmp/
+tmp*
 
 # pytest's tmp_path root, when a test's tmp dir resolves relative to the repo rather than
 # to the system temp directory. Test scratch files are never deliverables.
