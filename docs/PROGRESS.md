@@ -1228,6 +1228,40 @@ and `gates` said so before I noticed.
 **Not built, and named as such:** there is still no connector producing `OFFICIAL_FILING` documents.
 This round fixed the mapping a filing connector needs. That remains the CR-05 gap.
 
+### 2026-10-12 - CR-05: the filing connector, and the distinction it exists to express
+
+Full evidence: `docs/evidence/cr05_filing_connector.txt`. 19 tests. Closes CR-05's recording gap:
+"there is no connector producing OFFICIAL_FILING documents."
+
+**The payoff, through the SAME pipeline:**
+
+```
+10-Q filing   -> FactKind.OBSERVED            the document itself
+wire story    -> FactKind.ATTRIBUTED_CLAIM    somebody's account of it
+```
+
+Asserted three ways: a filing alone, a wire story alone, and both together with the kinds compared
+side by side. They can report the same number -- **collapsing them lets a secondary report carry a
+primary document's weight**, which is what invariant 4 exists to prevent. Before last round's
+source-derived mapping, both would have been ATTRIBUTED_CLAIM and nothing would have noticed.
+
+**What makes a document a FILING is not the connector's class name** -- that would be a label, not a
+fact. The source is registered as `OFFICIAL_FILING` with `AUTHORITATIVE` reliability, and the
+pipeline reads THAT to decide the kind. A connector cannot promote its own output. The accession
+number is the external id, because it is what a citation should use. And the form type is validated
+against a closed set: an unrecognised form is refused rather than stored, because it would be marked
+OBSERVED and then **weighted against nothing**.
+
+**It is deliberately NOT a subclass of `FixtureNewsConnector`.** The two are structurally identical,
+and a shared base class would invite a caller to treat them interchangeably -- precisely the confusion
+the epistemic-kind distinction exists to prevent. **The opposite of the usual DRY instinct, and the
+right call: the difference between these connectors is not implementation, it is MEANING.**
+
+**Not built, and named:** no `HttpFilingConnector`, so EDGAR is not contacted. The fixture proves the
+PIPELINE, not a feed. And **no staleness horizon is set for filings yet** -- a 10-Q currently inherits
+the conservative default, the same horizon as a news article. That is safe and wrong in spirit;
+`PERIODIC_FILING_FORMS` records the distinction and no policy consumes it yet.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.

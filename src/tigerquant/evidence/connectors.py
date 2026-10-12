@@ -48,12 +48,16 @@ if TYPE_CHECKING:
     from tigerquant.evidence.staleness import StalenessPolicy
 
 __all__ = [
+    "FILING_FORMS",
+    "PERIODIC_FILING_FORMS",
+    "FixtureFilingConnector",
     "FixtureNewsConnector",
     "HttpNewsConnector",
     "IngestionPipeline",
     "IngestionReport",
     "RawDocument",
     "SourceConnector",
+    "filing_document",
 ]
 
 #: A published timestamp further ahead than this is treated as a data fault, not a scoop.
@@ -499,6 +503,99 @@ class FixtureNewsConnector:
             if start <= ensure_utc(document.published_at) <= end
         ]
         return tuple(sorted(selected, key=lambda item: (item.published_at, item.external_id)))
+
+
+#: Filing form types this project models. A closed set on purpose: an unrecognised form would
+#: be stored with a shape nothing downstream knows how to read, and a filing whose type is
+#: unknown cannot be weighted against anything.
+FILING_FORMS: frozenset[str] = frozenset(
+    {"10-K", "10-Q", "8-K", "DEF 14A", "SC 13D", "SC 13G", "4"}
+)
+
+#: Forms that carry periodic financial results, whose relevance horizon is months rather than
+#: hours. Used by callers choosing a staleness category; not applied automatically, because how
+#: long a fact stays useful is a policy decision and not this module's to make.
+PERIODIC_FILING_FORMS: frozenset[str] = frozenset({"10-K", "10-Q"})
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureFilingConnector:
+    """A deterministic connector over filings supplied in code.
+
+    Structurally the same as :class:`FixtureNewsConnector` -- filter a window, sort
+    deterministically -- and deliberately NOT a subclass of it. The two produce different KINDS of
+    evidence, and a shared base class would invite a caller to treat them interchangeably, which is
+    the confusion the whole epistemic-kind distinction exists to prevent.
+
+    What makes a document a FILING rather than a news report is carried in ``attributes``:
+    ``form_type`` and ``accession_number``. The accession number is the external id, because it is
+    the identifier a regulator assigns and the one a citation should use.
+    """
+
+    source_id: str
+    documents: tuple[RawDocument, ...]
+    connector_id: str = "fixture-filing"
+
+    def fetch(self, *, since: dt.datetime, until: dt.datetime) -> tuple[RawDocument, ...]:
+        """Return filings in the window, oldest first, ordered deterministically.
+
+        Ordering matters for the same reason it does for news: the pipeline stores facts in the
+        order it receives them, so a deterministic order makes the durable log reproducible.
+        """
+        start = ensure_utc(since)
+        end = ensure_utc(until)
+        selected = [
+            document
+            for document in self.documents
+            if start <= ensure_utc(document.published_at) <= end
+        ]
+        return tuple(sorted(selected, key=lambda item: (item.published_at, item.external_id)))
+
+
+def filing_document(
+    *,
+    source_id: str,
+    accession_number: str,
+    form_type: str,
+    title: str,
+    body: str,
+    filed_at: dt.datetime,
+    url: str = "",
+    cik: str = "",
+) -> RawDocument:
+    """Build a filing document, refusing a form type this project does not model.
+
+    Refusing rather than accepting an unknown form: a filing whose type nobody recognises would be
+    stored, treated as OBSERVED because it came from an OFFICIAL_FILING source, and then weighted
+    against nothing. The type is the only thing that says how to read it.
+    """
+    normalised = form_type.strip().upper()
+    if normalised not in FILING_FORMS:
+        known = ", ".join(sorted(FILING_FORMS))
+        msg = (
+            f"form type {form_type!r} is not one this project models ({known}). Refusing rather "
+            "than storing a filing nothing downstream knows how to read."
+        )
+        raise ConfigurationError(msg)
+    if not accession_number.strip():
+        msg = "a filing needs an accession number; it is the identifier a citation should use"
+        raise ConfigurationError(msg)
+
+    return RawDocument(
+        source_id=source_id,
+        external_id=accession_number,
+        title=title,
+        body=body,
+        published_at=filed_at,
+        url=url,
+        attributes={
+            "form_type": normalised,
+            # Whether this form carries periodic results. Recorded so a caller choosing a
+            # staleness horizon does not have to re-derive it from a string.
+            "periodic": str(normalised in PERIODIC_FILING_FORMS).lower(),
+            **({"cik": cik} if cik else {}),
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)

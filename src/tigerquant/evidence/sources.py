@@ -111,6 +111,20 @@ DEFAULT_SOURCES: tuple[Source, ...] = (
         notes="Deterministic synthetic bars. Never indicates real market behaviour.",
     ),
     Source(
+        # A FILING IS A PRIMARY DOCUMENT. Its SourceKind is OFFICIAL_FILING, which the ingestion
+        # pipeline maps to FactKind.OBSERVED -- the document itself, not somebody's account of it.
+        # A wire story reporting the same numbers produces ATTRIBUTED_CLAIM from the same pipeline.
+        source_id="filing:fixture",
+        kind=SourceKind.OFFICIAL_FILING,
+        publisher="TigerQuant filing fixtures",
+        reliability=Reliability.AUTHORITATIVE,
+        license_scope=LicenseScope.PUBLIC,
+        notes=(
+            "Deterministic synthetic filings. Structurally real, factually invented. Never "
+            "indicates a real issuer's disclosures."
+        ),
+    ),
+    Source(
         source_id="derived:local",
         kind=SourceKind.DERIVED,
         publisher="TigerQuant deterministic services",

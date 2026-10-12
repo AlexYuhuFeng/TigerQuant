@@ -1,0 +1,89 @@
+TigerQuant CR-05 evidence - the filing connector, and the distinction it exists to express
+Generated: see the git commit this file was added in
+
+Closes the CR-05 gap recorded as "there is no connector producing OFFICIAL_FILING documents."
+19 tests.
+
+===========================================================================
+1. The payoff: two documents, same pipeline, different epistemic status
+===========================================================================
+    10-Q filing   -> FactKind.OBSERVED            the document itself
+    wire story    -> FactKind.ATTRIBUTED_CLAIM    somebody's account of it
+
+**Through the SAME IngestionPipeline.** That is the whole point, and it is asserted three ways: a
+filing alone, a wire story alone, and both together with the kinds compared side by side.
+
+They can report the same number. Collapsing them lets a secondary report carry a primary document's
+weight, which is what AGENTS.md invariant 4 exists to prevent. Before the source-derived mapping
+last round, both would have been ATTRIBUTED_CLAIM and nothing would have noticed.
+
+===========================================================================
+2. What makes a document a FILING
+===========================================================================
+Not the connector's class name -- that would be a label, not a fact. Three things:
+
+**The source is registered as `OFFICIAL_FILING`**, with `Reliability.AUTHORITATIVE`. That is what
+the pipeline reads to decide the fact kind. A connector cannot promote its own output.
+
+**The accession number is the external id.** A regulator assigns it, it is stable, and it is what a
+citation should use. An empty one is refused rather than defaulted.
+
+**The form type is carried and validated against a closed set** (`10-K`, `10-Q`, `8-K`, `DEF 14A`,
+`SC 13D`, `SC 13G`, `4`). The type is the only thing that says how to read the document, so an
+unrecognised form is REFUSED rather than stored: it would be marked OBSERVED because it came from a
+filing source, and then weighted against nothing.
+
+`periodic` is recorded alongside, so a caller choosing a staleness horizon does not re-derive it
+from a string.
+
+===========================================================================
+3. What it is deliberately NOT
+===========================================================================
+**Not a subclass of `FixtureNewsConnector`.** The two are structurally identical -- filter a window,
+sort deterministically -- and sharing a base class would invite a caller to treat them
+interchangeably, which is precisely the confusion the epistemic-kind distinction exists to prevent.
+A test asserts the two are unrelated types.
+
+This is the opposite of the usual DRY instinct, and it is the right call here: the difference
+between these connectors is not implementation, it is MEANING, and a shared base would erase it.
+
+===========================================================================
+4. Test results
+===========================================================================
+$ python -m pytest tests -q
+1101 passed
+
+$ python -m pytest tests/unit/test_filing_connector.py -q
+19 passed
+
+$ python -m tigerquant gates
+critical test cases: 14/16 proven, 2 partial, 0 unproven
+documented count [OK] pytest -q: claims 1101, actual 1101
+documented count [OK] pytest -q -m "not requires_db": claims 1081, actual 1081
+documented count [OK] pytest -q -m requires_db: claims 20, actual 20
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success. No issues found in 102 source files
+
+The count check caught this round's staleness too, for the second round running.
+
+===========================================================================
+5. Limitations
+===========================================================================
+1. **NO REAL FILING HAS BEEN FETCHED.** `FixtureFilingConnector` is deterministic and offline. There
+   is no `HttpFilingConnector`, so EDGAR is not contacted and no entitlement question has even been
+   asked for it. The fixture proves the PIPELINE, not a feed.
+2. **The fixture filings are invented.** They are structurally real -- accession number, form type,
+   CIK -- and factually synthetic. Nothing here indicates a real issuer's disclosures.
+3. **The staleness horizon is not set for filings.** `FILINGS` has no entry in any deployment's
+   per-category policy yet, so a filing currently inherits the conservative default -- the same
+   horizon as a news article. That is safe and it is also wrong in spirit: a 10-Q is relevant for
+   months and a wire story for hours. `PERIODIC_FILING_FORMS` records the distinction; no policy
+   consumes it yet.
+4. **`filing_document` does not validate the accession number's FORMAT.** It checks non-empty only.
+   A malformed number would be stored and would sort oddly against well-formed ones.
+5. The instrument is still `None` on every ingested fact, filings included. A filing names an
+   issuer, not a ticker, so wiring one to the other is a mapping problem this round did not touch.
