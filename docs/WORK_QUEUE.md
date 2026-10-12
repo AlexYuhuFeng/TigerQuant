@@ -40,8 +40,8 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **1160 passed** |
-| `pytest -q -m "not requires_db"` | **1140 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **1170 passed** |
+| `pytest -q -m "not requires_db"` | **1150 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
 
 **The counts above are VERIFIED by `tigerquant gates`** against a record written by the last full test run. See `docs/evidence/documented_counts_verified.txt`.
@@ -62,8 +62,7 @@ Last updated: 2026-10-10.
    The project's grant deliberately carries four read scopes only. Every part of CR-03 that can
    be built without it has been built and tested against a fake SDK; the one remaining
    acceptance item is a real paper round trip, and it cannot be faked or worked around.
-2. **No remote CI runner.** `.github/workflows/ci.yml` is written and its commands are executed
-   locally with identical results, but no GitHub run exists to link.
+2. **CI RUNS AND WAS RED ON EVERY PUSH.** The earlier note here said no remote runner existed, so CI was never consulted -- but 32 runs had completed, all failing, at the very moments this project was pushing. The failure was mypy strict on a psycopg import: CI syncs only --extra dev, psycopg.* was missing from the optional-import override list, and **the local environment has the db extra installed, so it passed here.** Fixed, with a test comparing the two lists. See docs/evidence/ci_was_red.txt.
 3. **`pip-audit` NOW RUNS and reports ONE UNFIXABLE FINDING.** The earlier note here said advisory
    access was unavailable and the audit "could not run" -- **that stopped being true and was never
    retested**, while carrying a gate item. It now reports `fsspec 2026.2.0`, `CVE-2026-104851`.

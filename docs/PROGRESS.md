@@ -1409,6 +1409,54 @@ risk and an ignored one.**
 **Two tests failed when this was first wired, and they were RIGHT to:** a `GateReport` with no audit
 is genuinely not ok. They now supply a recorded audit -- the correct fixture, not a workaround.
 
+### 2026-10-12 - CI was running the whole time, and red on every push
+
+Full evidence: `docs/evidence/ci_was_red.txt`. 10 tests. Found by sweeping the limitations recorded
+in earlier rounds -- work this project had been naming as "the obvious next thing" for two rounds.
+
+**The stale claim.** `WORK_QUEUE.md` recorded, and PROGRESS.md repeated: *"No remote CI runner...
+no GitHub run exists to link."* **That was false.** The repository had **32 completed workflow runs**,
+the most recent five timestamped `03:58`, `04:08`, `04:16`, `04:25`, `04:40` -- **the exact moments
+this project was pushing.** Every one failed.
+
+`github.com` was unreachable in the early rounds and became reachable later. **The limitation was
+never retested against the new network.** This is the second time in three rounds a "cannot" claim
+turned out to be stale, and the first (`pip-audit`) was also carrying a gate item.
+
+**Why nobody saw it: two stale claims covering for each other.** The project believed there was no CI,
+so it never looked; and because it never looked, nothing contradicted the belief. **A green local run
+confirmed the belief every time without testing it.** A limitation believed is a check not performed,
+and its absence looks exactly like success.
+
+**What it was failing on.** `mypy` strict, on every platform and version:
+`src/tigerquant/db/postgres.py:50: error: Cannot find implementation or library` -- that line is
+`import psycopg`, inside a `try/except ImportError`.
+
+**The code was right.** ADR-0001 §6 requires optional integrations to import lazily and degrade
+explicitly. **The configuration was wrong:** the mypy override list read
+`["tigeropen.*", "nautilus_trader.*", "litellm.*"]` -- **`psycopg.*` was missing**, while the other
+three optional SDKs were present. CI's fast job syncs only `--extra dev`, so `psycopg` is genuinely
+absent there; **locally the `db` extra is installed, so it passed.** Reproducible only in the
+environment nobody was looking at.
+
+**The same defect shape, a fourth time:** a list on one side of an interface disagreeing with a list
+on the other, with nothing comparing them. The first three were found by reading. **This one was
+found by CI, and only after CI was discovered to exist** -- had the claim been believed one round
+longer, those would still be the only three known.
+
+**Fixed, with a check that stops it recurring:** every extra is either mapped to its import root or
+**named with a reason**, asserted in BOTH directions, plus a test that the `psycopg` import remains
+guarded -- because the override hides a missing MODULE from mypy and must not become cover for an
+unguarded import.
+
+**`Docker Hub IS still unreachable`** (retested: `registry-1.docker.io` and `auth.docker.io` both
+time out), though `ghcr.io` and `public.ecr.aws` are reachable, so the stated claim is true while the
+implied one is narrower than it sounds.
+
+**Named limitation:** `mypy` passing locally is NOT evidence it passes in CI -- that is the whole
+lesson. The new test compares DECLARATIONS; it cannot prove CI is green. The verification is the CI
+run this commit triggers.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.

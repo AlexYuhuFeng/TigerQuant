@@ -1,0 +1,140 @@
+TigerQuant - CI was running the whole time, and was red on every push
+Generated: see the git commit this file was added in
+
+Found while sweeping the limitations recorded in earlier rounds, which is work this project had been
+naming as "the obvious next thing" for two rounds.
+
+===========================================================================
+1. The stale claim
+===========================================================================
+`docs/WORK_QUEUE.md` recorded, and PROGRESS.md repeated:
+
+    **No remote CI runner.** `.github/workflows/ci.yml` is written and its commands are executed
+    locally with identical results, but no GitHub run exists to link.
+
+**That was false.** The repository had **32 completed workflow runs**, and the most recent five were
+timestamped `2026-10-12T03:58`, `04:08`, `04:16`, `04:25`, `04:40` -- **the exact moments this
+project was pushing.**
+
+```
+$ gh api repos/.../actions/runs
+RESULT total: 32
+RESULT ci | status=completed | conclusion=failure | 2026-10-12T04:40:00Z
+RESULT ci | status=completed | conclusion=failure | 2026-10-12T04:25:24Z
+...
+```
+
+**Every one failed.** The note was true when written -- early rounds had no runner -- and then it
+stopped being true, and nothing rechecked it.
+
+`github.com` was unreachable in the early rounds and became reachable later. The limitation was
+never retested against the new network. **This is the second time in three rounds that a "cannot"
+claim turned out to be stale**, and the first one (`pip-audit`) was carrying a gate item too.
+
+===========================================================================
+2. Why nobody saw it
+===========================================================================
+**Two stale claims covering for each other.** The project believed there was no CI, so it never
+looked at CI; and because it never looked, nothing contradicted the belief. A green local run
+confirmed the belief every time without testing it.
+
+That is the general shape: **a limitation believed is a check not performed**, and its absence looks
+exactly like success.
+
+===========================================================================
+3. What CI was failing on
+===========================================================================
+    RESULT job: fast (py3.14 on windows-latest) | failure
+    RESULT   FAILED STEP: Typecheck (strict)
+
+...on every Python version and both platforms. The error:
+
+    src/tigerquant/db/postgres.py:50: error: Cannot find implementation or library
+    src/tigerquant/db/postgres.py:69: error: Cannot find implementation or library
+    Found 2 errors in 1 file (checked 102 source files)
+
+Line 50 is `import psycopg`, inside a `try/except ImportError`.
+
+**The code was right.** ADR-0001 section 6 requires optional integrations to import lazily and degrade
+explicitly, and this one does.
+
+**The configuration was wrong.** `pyproject.toml` declares the extras `broker`, `db`, `engine`,
+`llm`, `dashboard`, and the mypy override list read:
+
+    module = ["tigeropen.*", "nautilus_trader.*", "litellm.*"]
+
+**`psycopg.*` was missing** -- while `tigeropen`, `nautilus_trader` and `litellm` were all present.
+
+CI's fast job runs `uv sync --frozen --extra dev`, deliberately without the optional extras, so
+`psycopg` is genuinely absent there. **Locally the `db` extra is installed, so `mypy` passed.**
+The failure was reproducible only in the environment nobody was looking at.
+
+===========================================================================
+4. This is the same defect shape, a fourth time
+===========================================================================
+**A list on one side of an interface disagreeing with a list on the other, with nothing comparing
+them.**
+
+1. The pipeline emitted categories the staleness policy did not name.
+2. `KNOWN_CATEGORIES` was missing two categories the policy used -- and was never consumed.
+3. Four policy categories had no producer.
+4. **`psycopg` missing from the optional-import override list.**
+
+The first three were found by reading. **This one was found by CI, and only after CI was discovered
+to exist.** Had the "no CI runner" claim been believed for another round, the other three would
+still have been the only ones known.
+
+===========================================================================
+5. The fix, and the check that stops it recurring
+===========================================================================
+`psycopg.*` and `psycopg_binary.*` added to the override list, with a comment recording what the
+omission cost.
+
+And a test that compares the two lists, so it cannot drift again:
+
+    EXTRA_TO_MODULE = {"broker": "tigeropen", "db": "psycopg",
+                       "engine": "nautilus_trader", "llm": "litellm"}
+    NO_OVERRIDE_NEEDED = {"dev": "...", "dashboard": "..."}
+
+* every extra is either mapped or **named with a reason** -- an extra that needs no override and one
+  somebody FORGOT are indistinguishable otherwise;
+* every mapped SDK has an override entry;
+* **the reverse direction too**: an override for a package no extra declares is a claim about a
+  dependency that does not exist;
+* the `psycopg` import is still guarded by `try/except ImportError`, because the override hides a
+  missing MODULE from mypy and must not become cover for an unguarded import.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+1170 passed
+
+$ python -m pytest tests/unit/test_optional_import_declarations.py -q
+10 passed
+
+$ python -m mypy                            -> Success. No issues found in 102 source files
+$ python -m ruff check src tests tools      -> All checks passed!
+$ python -m tigerquant gates                -> exit 0, counts OK
+
+The verification that matters is the CI run this commit triggers -- see section 7.
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. **`mypy` passing locally is NOT evidence that it passes in CI**, and that is the entire lesson
+   here. The two environments differ by exactly the optional extras. The new test compares the
+   DECLARATIONS, which is the part that can be checked without a second environment; it cannot prove
+   CI is green.
+2. The other stale-limitation candidates from earlier rounds are **still not fully swept**. This
+   round tested the two most load-bearing ones (CI, Docker Hub) and found one stale and one still
+   true. Roughly forty other claims remain untested, most of which are design statements that cannot
+   go stale -- but that is an assumption, not a finding.
+3. `Docker Hub IS still unreachable` (retested: `registry-1.docker.io` and `auth.docker.io` both time
+   out). `ghcr.io` and `public.ecr.aws` ARE reachable, so the claim is true as written while the
+   implication -- that no Postgres image can be obtained -- is narrower than it sounds.
+4. The 32 historical CI runs remain failed in the repository history. They are evidence of what
+   happened and are not being deleted or re-run.
+5. Nothing in this round explains why the `extras` job passed while `fast` failed; the `extras` job
+   installs the optional dependencies, which is exactly why `mypy` has nothing to complain about
+   there. The two jobs check different things and only one of them type-checks the full tree.

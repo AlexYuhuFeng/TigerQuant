@@ -142,5 +142,11 @@ disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 # Optional third-party SDKs are imported lazily inside adapters (ADR-0001 §6).
-module = ["tigeropen.*", "nautilus_trader.*", "litellm.*"]
+#
+# MUST list every optional extra's import root. It did not: `psycopg` was missing while `tigeropen`,
+# `nautilus_trader` and `litellm` were here. So `mypy` passed LOCALLY (where the `db` extra is
+# installed) and FAILED IN CI (which syncs only `--extra dev`). Every CI run was red, and it went
+# unseen because the project had ALSO recorded "no remote CI runner" as a limitation -- two stale
+# claims covering for each other. A test now compares this list against the extras declared above.
+module = ["tigeropen.*", "nautilus_trader.*", "litellm.*", "psycopg.*", "psycopg_binary.*"]
 ignore_missing_imports = true
