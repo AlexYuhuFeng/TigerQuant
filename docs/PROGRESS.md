@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: CR-09 offline work exhausted; CR-03 awaits the owner's consent
+Current CR: reconnect the repository on backoff; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -937,6 +937,39 @@ skipped suite is worse than a slow one.
 
 It still cannot trade, re-asserted AFTER the wiring: a database connection is the most plausible
 route by which an order path could creep into a reading loop, so the absence is asserted again.
+
+### 2026-10-12 - CR-09 part 14: a backoff tier between "fine" and "halted"
+
+Full evidence: `docs/evidence/cr09_supervisor_backoff.txt`. New `BackoffPolicy`, 20 tests.
+
+**THE SAFETY PROPERTY IS THE CLASSIFICATION, NOT THE RETRYING**, and getting it backwards would
+make the supervisor worse rather than better. Retrying is right for a database that blinked and
+WRONG for a bug: hammering a broken code path produces exactly the state this module exists to
+avoid -- a process that is up, is logging, and is achieving nothing -- while a brief outage should
+page nobody.
+
+So the classifier **defaults to NEVER**: an unclassified failure is PERMANENT and halts, because
+retrying a defect for ever is the worse of the two mistakes since it looks like health. Only a
+small explicit set of database-shaped failures is transient, matched by exception NAME because the
+`db` extra is optional and this module must import without it -- weaker than isinstance, stated
+rather than hidden, and mitigated by the permanent default.
+
+**Two counters, deliberately.** `max_consecutive_failures` counts defects; the transient streak
+counts outages. Sharing one would let a flapping database spend the budget that exists to catch a
+real defect. The halt reasons are distinct for the same reason: `max_consecutive_failures` is a
+defect, `transient_exhausted` is an outage that outlasted its budget, and an operator acts
+differently on each.
+
+**`max_attempts` is bounded on purpose.** "Retry for ever" is the one policy that guarantees the
+process outlives the incident it is supposed to report, and nobody notices it stopped working.
+
+Observed: two `DbDown` failures retried with backoff then recovered (4 cycles, not halted); a
+`ValueError` halted at cycle 1 **despite 8 attempts of budget available**; an unrecovering outage
+halted with `transient_exhausted` after exactly 8.
+
+**The most important remaining gap, recorded as a limitation:** a backoff retry re-reads the
+journal but REUSES the held repository connection, so against a database that actually restarted
+the retry would fail again for a reason the backoff cannot fix.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

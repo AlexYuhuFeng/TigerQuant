@@ -40,6 +40,8 @@ def ns(journal_path: Path, **kwargs: object) -> argparse.Namespace:
         "interval": 0.001,
         "iterations": 2,
         "max_failures": 3,
+        "retry_attempts": 8,
+        "retry_max_seconds": 60.0,
         "heartbeat": None,
         "no_alerts": True,
         "alert_log": None,

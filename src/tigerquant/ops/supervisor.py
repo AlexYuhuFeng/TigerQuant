@@ -30,7 +30,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from tigerquant.ops.alerts import AlertRouter
 
 __all__ = [
+    "TRANSIENT_EXHAUSTED",
+    "BackoffPolicy",
     "CycleOutcome",
     "Supervisor",
     "SupervisorConfig",
@@ -56,6 +58,11 @@ __all__ = [
 #: action it takes on its own behalf.
 HALTED_AT = "max_consecutive_failures"
 
+#: The OTHER halt reason, kept distinct because the two mean different things operationally:
+#: "max_consecutive_failures" is a defect, "transient_exhausted" is an outage that outlasted
+#: the retry budget. An operator acts differently on each.
+TRANSIENT_EXHAUSTED = "transient_exhausted"
+
 
 class SupervisorHalted(RuntimeError):
     """Raised when the supervisor stops itself after repeated failures.
@@ -63,6 +70,49 @@ class SupervisorHalted(RuntimeError):
     Distinct from an ordinary exception because the caller needs to be able to tell "the loop
     stopped because the system is broken" from "the loop stopped because someone asked it to".
     """
+
+
+@dataclass(frozen=True, slots=True)
+class BackoffPolicy:
+    """How long to wait after a TRANSIENT failure, and when to stop waiting.
+
+    Exponential with a ceiling, rather than a fixed delay, because the two failure modes have
+    different right answers: a database restarting wants a short first retry, and a network
+    partition wants the retries to thin out rather than hammer a host that is already unwell.
+    """
+
+    #: Wait after the first transient failure.
+    initial_seconds: float = 1.0
+    multiplier: float = 2.0
+    #: Ceiling. Without one, a long outage produces retries hours apart while the process still
+    #: holds a connection and a heartbeat, which looks healthy to everything watching it.
+    max_seconds: float = 60.0
+    #: Consecutive TRANSIENT failures before giving up and halting.
+    #:
+    #: Bounded on purpose. "Retry for ever" is the one policy that guarantees the process outlives
+    #: the incident it is supposed to report, and nobody ever notices it stopped working.
+    max_attempts: int = 8
+
+    def __post_init__(self) -> None:
+        if self.initial_seconds <= 0:
+            msg = "initial_seconds must be positive"
+            raise ValueError(msg)
+        if self.multiplier < 1:
+            msg = "multiplier must be at least 1; a shrinking backoff is not a backoff"
+            raise ValueError(msg)
+        if self.max_seconds < self.initial_seconds:
+            msg = "max_seconds must be at least initial_seconds"
+            raise ValueError(msg)
+        if self.max_attempts < 1:
+            msg = "max_attempts must be at least 1"
+            raise ValueError(msg)
+
+    def delay_for(self, attempt: int) -> float:
+        """Seconds to wait before retry number ``attempt`` (1-based)."""
+        if attempt < 1:
+            msg = "attempt is 1-based"
+            raise ValueError(msg)
+        return min(self.initial_seconds * (self.multiplier ** (attempt - 1)), self.max_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +127,8 @@ class SupervisorConfig:
     heartbeat_path: Path | None = None
     #: Stop after this many cycles. None means run until stopped.
     max_cycles: int | None = None
+    #: How transient failures are retried. See BackoffPolicy.
+    backoff: BackoffPolicy = field(default_factory=BackoffPolicy)
 
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
@@ -102,6 +154,8 @@ class CycleOutcome:
     #: for doing its job.
     drift_detected: bool = False
     severity: str = ""
+    #: True when the failure was classified transient and will be retried after a backoff.
+    transient: bool = False
 
     @property
     def duration_seconds(self) -> float:
@@ -119,6 +173,7 @@ class CycleOutcome:
             "duration_seconds": str(Decimal(str(round(self.duration_seconds, 6)))),
             "ok": self.ok,
             "error": self.error,
+            "transient": self.transient,
             "drift_detected": self.drift_detected,
             "severity": self.severity,
         }
@@ -187,7 +242,15 @@ class Supervisor:
     without a database and keeps its "does not trade" property structural rather than promised.
     """
 
-    __slots__ = ("_alert_on_halt", "_config", "_cycle", "_outcomes", "_router", "_stopped")
+    __slots__ = (
+        "_alert_on_halt",
+        "_config",
+        "_cycle",
+        "_is_transient",
+        "_outcomes",
+        "_router",
+        "_stopped",
+    )
 
     def __init__(
         self,
@@ -195,9 +258,19 @@ class Supervisor:
         *,
         config: SupervisorConfig | None = None,
         router: AlertRouter | None = None,
+        is_transient: Callable[[BaseException], bool] | None = None,
     ) -> None:
-        """``cycle`` returns True when it detected a problem, False or None when clean."""
+        """``cycle`` returns True when it detected a problem, False or None when clean.
+
+        ``is_transient`` decides whether a failure is worth RETRYING. It defaults to never, so an
+        unclassified failure halts the loop: retrying a bug for ever is the worse of the two
+        mistakes, because a loop that keeps running looks like health.
+        """
         self._cycle = cycle
+        # Deny-by-default: an unclassified failure is treated as PERMANENT, so the loop halts
+        # rather than retrying a bug for ever. Retrying a defect is the worse of the two
+        # mistakes because it looks like health.
+        self._is_transient = is_transient or (lambda _exc: False)
         self._config = config or SupervisorConfig()
         self._router = router
         self._outcomes: list[CycleOutcome] = []
@@ -224,6 +297,7 @@ class Supervisor:
         """Run until stopped, until ``max_cycles``, or until consecutive failures force a halt."""
         index = 0
         consecutive_failures = 0
+        transient_streak = 0
         ok_cycles = 0
         failed_cycles = 0
         worst = ""
@@ -236,11 +310,13 @@ class Supervisor:
             error = ""
             detected = False
             severity = ""
+            raised: BaseException | None = None
             try:
                 detected = bool(self._cycle())
                 severity = "WARNING" if detected else ""
             except Exception as exc:  # noqa: BLE001 - a cycle must not kill the supervisor
                 error = f"{type(exc).__name__}: {exc}"
+                raised = exc
 
             finished = _now()
             outcome = CycleOutcome(
@@ -255,16 +331,41 @@ class Supervisor:
             self._outcomes.append(outcome)
             self._write_heartbeat(index=index, started_at=started, phase="idle", last_ok=outcome.ok)
 
-            if error:
-                failed_cycles += 1
-                consecutive_failures += 1
-            else:
-                ok_cycles += 1
-                # A cycle that RAN and found drift is a success. Counting it as a failure would
-                # halt the supervisor for doing its job.
-                consecutive_failures = 0
+            transient, consecutive_failures, transient_streak, ok_cycles, failed_cycles = (
+                self._classify(
+                    error=error,
+                    raised=raised,
+                    consecutive_failures=consecutive_failures,
+                    transient_streak=transient_streak,
+                    ok_cycles=ok_cycles,
+                    failed_cycles=failed_cycles,
+                )
+            )
+            if transient:
+                self._outcomes[-1] = replace(self._outcomes[-1], transient=True)
             if severity and severity > worst:
                 worst = severity
+
+            if transient and transient_streak < self._config.backoff.max_attempts:
+                delay = self._config.backoff.delay_for(transient_streak)
+                self._write_heartbeat(
+                    index=index,
+                    started_at=started,
+                    phase="backoff",
+                    last_ok=False,
+                )
+                self._sleep(delay)
+                continue
+
+            if transient and transient_streak >= self._config.backoff.max_attempts:
+                reason = (
+                    f"{TRANSIENT_EXHAUSTED}: {transient_streak} consecutive TRANSIENT failure(s) "
+                    f"survived backoff up to {self._config.backoff.max_seconds}s; last error: "
+                    f"{error}. Halting because a retry loop that outlives its incident is a "
+                    "process nobody notices has stopped working."
+                )
+                self._halt(reason)
+                return self._report(index, ok_cycles, failed_cycles, worst, halted_reason=reason)
 
             if consecutive_failures >= self._config.max_consecutive_failures:
                 reason = (
@@ -281,16 +382,50 @@ class Supervisor:
             if self._config.max_cycles is not None and index >= self._config.max_cycles:
                 break
 
-            if self._config.interval_seconds:
-                # Sleep in slices so a stop request is honoured promptly rather than after the
-                # whole interval. A minute-long interval should not make Ctrl-C wait a minute.
-                remaining = self._config.interval_seconds
-                while remaining > 0 and not self._stopped:
-                    nap = min(0.5, remaining)
-                    time.sleep(nap)
-                    remaining -= nap
+            self._sleep(self._config.interval_seconds)
 
         return self._report(index, ok_cycles, failed_cycles, worst, halted_reason="")
+
+    def _classify(
+        self,
+        *,
+        error: str,
+        raised: BaseException | None,
+        consecutive_failures: int,
+        transient_streak: int,
+        ok_cycles: int,
+        failed_cycles: int,
+    ) -> tuple[bool, int, int, int, int]:
+        """(transient, consecutive_failures, transient_streak, ok_cycles, failed_cycles).
+
+        Two counters, deliberately. A flapping database and a broken code path are different
+        incidents, and sharing one counter would let a transient blip spend the budget that exists
+        to catch a real defect.
+
+        The classifier is consulted only when a cycle actually raised, and it DEFAULTS TO NEVER,
+        so an unclassified failure is permanent and halts.
+        """
+        if not error:
+            # A cycle that RAN and found drift is a success. Counting it as a failure would halt
+            # the supervisor for doing its job.
+            return False, 0, 0, ok_cycles + 1, failed_cycles
+
+        transient = raised is not None and self._is_transient(raised)
+        if transient:
+            return True, consecutive_failures, transient_streak + 1, ok_cycles, failed_cycles + 1
+        return False, consecutive_failures + 1, transient_streak, ok_cycles, failed_cycles + 1
+
+    def _sleep(self, seconds: float) -> None:
+        """Sleep in slices so a stop request is honoured promptly.
+
+        A minute-long backoff should not make Ctrl-C wait a minute, and the same is true of the
+        normal interval.
+        """
+        remaining = seconds
+        while remaining > 0 and not self._stopped:
+            nap = min(0.5, remaining)
+            time.sleep(nap)
+            remaining -= nap
 
     # -- internals ---------------------------------------------------------------
 

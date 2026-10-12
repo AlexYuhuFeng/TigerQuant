@@ -27,7 +27,12 @@ from typing import TYPE_CHECKING, Any
 
 from tigerquant.core.enums import Mode
 from tigerquant.ops.alerts import AlertRouter
-from tigerquant.ops.supervisor import Supervisor, SupervisorConfig, SupervisorReport
+from tigerquant.ops.supervisor import (
+    BackoffPolicy,
+    Supervisor,
+    SupervisorConfig,
+    SupervisorReport,
+)
 
 if TYPE_CHECKING:
     import argparse
@@ -100,14 +105,24 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         max_consecutive_failures=args.max_failures,
         heartbeat_path=args.heartbeat,
         max_cycles=args.iterations,
+        backoff=BackoffPolicy(
+            initial_seconds=min(1.0, args.interval),
+            max_seconds=args.retry_max_seconds,
+            max_attempts=args.retry_attempts,
+        ),
     )
-    supervisor = Supervisor(cycle, config=config, router=router)
+    supervisor = Supervisor(cycle, config=config, router=router, is_transient=is_transient_failure)
 
     print(f"supervising {args.journal}")
     print(f"  interval          {args.interval}s")
     print(f"  max failures      {args.max_failures} consecutive, then halt")
     print(f"  heartbeat         {args.heartbeat}")
     print(f"  cycles            {'until stopped' if args.iterations is None else args.iterations}")
+    print(
+        f"  transient retry   {args.retry_attempts} attempt(s), backoff ceiling "
+        f"{args.retry_max_seconds}s. Only database-shaped failures are retried; anything "
+        "else halts at once."
+    )
     print(f"  database          {_describe_database(repository)}")
     print()
     if not args.quiet:
@@ -161,6 +176,38 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     # Exit 2 on a halt, so a supervisor can be supervised by whatever started it. Exiting 0 would
     # make a self-halted loop indistinguishable from a clean shutdown.
     return 2 if report.halted else 0
+
+
+#: Exception types that mean "the database is not reachable right now" rather than "the code is
+#: wrong". Deliberately a small, explicit set: anything not listed here is PERMANENT and halts.
+_TRANSIENT_NAMES = frozenset(
+    {
+        "OperationalError",
+        "ConnectionTimeout",
+        "ConnectionRefused",
+        "InterfaceError",
+        "AdminShutdown",
+        "CannotConnectNow",
+        "TooManyConnections",
+    }
+)
+
+
+def is_transient_failure(exc: BaseException) -> bool:
+    """Whether a failed cycle is worth RETRYING.
+
+    Matched by exception NAME rather than by importing the driver's hierarchy, because the `db`
+    extra is optional and this module must import without it. Name matching is weaker than an
+    isinstance check and that is stated rather than hidden -- the mitigation is that the set is
+    small and explicit, and anything unlisted is treated as permanent.
+    """
+    for klass in type(exc).__mro__:
+        if klass.__name__ in _TRANSIENT_NAMES:
+            return True
+    # psycopg wraps the real cause; a connection error inside an otherwise generic exception is
+    # still a connection error.
+    cause = exc.__cause__
+    return cause is not None and cause is not exc and is_transient_failure(cause)
 
 
 def _select_repository(
@@ -259,6 +306,22 @@ def supervise_parser(sub: object) -> None:
             "PostgreSQL DSN. Omit to reconcile against an in-memory repository, which is a "
             f"WIRING CHECK and not a live reconciliation. {DSN_ENV} is the environment equivalent."
         ),
+    )
+    supervise.add_argument(
+        "--retry-attempts",
+        type=int,
+        default=8,
+        help=(
+            "consecutive TRANSIENT failures to retry with exponential backoff before halting. "
+            "A database that blinks is retried; anything else halts immediately, because retrying "
+            "a defect for ever looks like health."
+        ),
+    )
+    supervise.add_argument(
+        "--retry-max-seconds",
+        type=float,
+        default=60.0,
+        help="ceiling on the backoff delay, so a long outage does not produce retries hours apart",
     )
     supervise.add_argument("--no-alerts", action="store_true", help="run without routing alerts")
     supervise.add_argument("--alert-log", type=Path, default=None, help="file sink for alerts")

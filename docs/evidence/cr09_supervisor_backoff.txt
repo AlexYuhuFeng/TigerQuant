@@ -1,0 +1,118 @@
+TigerQuant CR-09 evidence (part 14) - a backoff tier between "fine" and "halted"
+Generated: see the git commit this file was added in
+
+Closes the limitation recorded in part 13: "If the database drops mid-run, the next cycle raises,
+and after max_consecutive_failures the supervisor halts. That is the designed behaviour, but a
+transient network blip therefore stops the loop; there is no backoff-and-retry tier between 'fine'
+and 'halted'."
+
+===========================================================================
+1. THE SAFETY PROPERTY IS THE CLASSIFICATION, NOT THE RETRYING
+===========================================================================
+This is the whole design, and getting it backwards would make the supervisor worse rather than
+better.
+
+Retrying is right for a database that blinked. It is WRONG for a bug: hammering a broken code path
+produces exactly the state this module exists to avoid -- a process that is up, is logging, and is
+achieving nothing -- while a brief outage should page nobody.
+
+So failures are CLASSIFIED, and:
+
+  * the classifier DEFAULTS TO NEVER. An unclassified failure is PERMANENT and halts. Retrying a
+    defect for ever is the worse of the two mistakes, because it looks like health.
+  * only a database-shaped failure is transient. The set is small and explicit:
+    OperationalError, ConnectionTimeout, ConnectionRefused, InterfaceError, AdminShutdown,
+    CannotConnectNow, TooManyConnections.
+  * the wrapped cause is followed, because drivers commonly wrap the real error.
+
+Matched by exception NAME rather than by importing the driver's hierarchy, because the `db` extra
+is optional and this module must import without it. Name matching is weaker than an isinstance
+check, and that is stated rather than hidden; the mitigation is the small explicit set plus a
+permanent default.
+
+===========================================================================
+2. Two counters, deliberately
+===========================================================================
+`max_consecutive_failures` counts DEFECTS. The new transient streak counts OUTAGES. They are
+separate because a flapping database and a broken code path are different incidents, and sharing
+one counter would let a transient blip spend the budget that exists to catch a real defect.
+
+The halt reasons are distinct for the same reason -- an operator acts differently on each:
+
+    max_consecutive_failures   a defect; retrying will not help
+    transient_exhausted        an outage that outlasted the retry budget
+
+`max_attempts` is bounded ON PURPOSE. "Retry for ever" is the one policy that guarantees the
+process outlives the incident it is supposed to report, and nobody notices it stopped working.
+
+===========================================================================
+3. The backoff shape
+===========================================================================
+Exponential with a ceiling, because the two ends have different right answers: a database
+restarting wants a short first retry, and a network partition wants retries to thin out rather
+than hammer a host that is already unwell.
+
+    delay_for(n) = min(initial_seconds * multiplier**(n-1), max_seconds)
+
+Policies that refuse to exist, each because it would be actively harmful:
+
+    initial_seconds=0      a zero delay is a spin, not a backoff
+    multiplier<1           a backoff that gets SHORTER would hammer a sick host
+    max_seconds<initial    an incoherent ceiling
+    max_attempts=0         halts before the first retry, which is what max_consecutive_failures
+                           already does
+
+===========================================================================
+4. Observed behaviour
+===========================================================================
+    recovered:  supervisor: 4 cycle(s), 2 ok, 2 failed; stopped normally
+                (two DbDown failures, retried with backoff, then the cycle succeeded)
+
+    permanent:  halted=True, cycles=1
+                (a ValueError halts IMMEDIATELY despite 8 attempts of retry budget available --
+                 deny-by-default working)
+
+    exhausted:  halted_reason starts "transient_exhausted: 8 consecutive TRANSIENT failure(s)..."
+
+And on the command line:
+
+    $ tigerquant supervise <journal> --dsn ... --retry-attempts 8 --retry-max-seconds 60
+      transient retry   8 attempt(s), backoff ceiling 60.0s. Only database-shaped failures are
+                        retried; anything else halts at once.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+939 passed
+
+$ python -m pytest tests/unit/test_supervisor_backoff.py -q
+20 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 99 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. The transient set is matched by NAME. A driver that raises a differently-named connection error
+   would be treated as PERMANENT and halt. That errs toward stopping rather than spinning, which
+   is the right direction, but it is a real false-negative risk and it is why the set is
+   documented rather than inlined.
+2. The connection is still opened once and held. A backoff retry REUSES the cycle, which
+   reconnects only because `build_cycle` re-reads the journal each time -- the repository's
+   connection is NOT re-established. Against a database that actually restarted, the retry would
+   fail again for a reason the backoff cannot fix. This is the most important remaining gap.
+3. No jitter. Several supervisors backing off in lockstep after a shared outage would retry in
+   synchrony, which is the thundering-herd problem. One process, no herd -- but worth naming.
+4. The backoff is not persisted, so a restart begins the delay schedule again from the first step.
+5. `initial_seconds` is derived from `--interval` (capped at 1s) rather than being its own flag,
+   which is convenient and slightly opaque.
+6. No test exercises a real database going away and coming back. The classification is tested with
+   synthetic exception types, which is the logic, but not the integration.
