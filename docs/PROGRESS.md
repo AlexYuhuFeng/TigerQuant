@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: gate verification is in place; CR-03 and CR-06 await the owner's decisions
+Current CR: gates verify cases AND counts; CR-03 and CR-06 await the owner's decisions
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -1153,6 +1153,44 @@ the document is prose.
 the natural job of 	igerquant gates -- it already collects the suite and knows how many tests
 exist. Until that exists the counts are hand-maintained and can rot silently, which is exactly what
 happened here.
+
+### 2026-10-12 - Documented test counts are verified against a real run
+
+Full evidence: `docs/evidence/documented_counts_verified.txt`. 25 tests. **Closes the stale-count
+gap found two rounds ago, after one failed attempt and a revert.**
+
+**The defect:** `WORK_QUEUE.md` read "731 passed" for several rounds -- a lost update in a
+read-modify-write script over a shared document. **Nothing detected it, because a stale test count
+is not a test failure.**
+
+**The first attempt failed** because spawning `pytest --collect-only` HANGS here -- confirmed with
+`capture_output=True` AND with the child's stdout sent to a file. **Subprocess execution itself does
+not complete in this environment**, not merely piped stdio. That attempt was reverted.
+
+**What works is better than the original design.** A `pytest_collection_finish` hook records what
+collection actually saw, and `gates` compares the documents against it:
+
+```
+$ python -m tigerquant gates
+documented count [OK] pytest -q: claims 1069, actual 1069
+documented count [OK] pytest -q -m "not requires_db": claims 1049, actual 1049
+documented count [OK] pytest -q -m requires_db: claims 20, actual 20
+```
+
+The documents are compared against **the run that actually happened**, not a hypothetical second
+collection by a second interpreter.
+
+**Three defects found while building it.** *Two absences compared equal*: with both the document and
+the record missing, `claimed == actual` was `-1 == -1` and reported **OK** -- the one outcome a gate
+must never produce. *A subset run clobbered the record*, so full-suite claims were compared against
+a fragment and reported stale when they were correct. And *the `render()` patch silently did not
+land*, so the counts were computed, correct, and **invisible** -- the JSON and exit code were right
+while the human-readable report omitted the section. That one was found by asserting on rendered
+text rather than on underlying data.
+
+**Proven against the exact historical failure:** setting the document back to "731 passed" gives
+`ok: False, STALE DOCUMENTED COUNTS: 1`. And a missing record fails too (`actual -1`), rather than
+defaulting to success.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

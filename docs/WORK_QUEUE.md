@@ -40,9 +40,11 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **1044 passed** |
-| `pytest -q -m "not requires_db"` | **1024 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **1069 passed** |
+| `pytest -q -m "not requires_db"` | **1049 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
+
+**The counts above are VERIFIED by `tigerquant gates`** against a record written by the last full test run. See `docs/evidence/documented_counts_verified.txt`.
 | `mypy` (strict) | Success, 92 source files |
 | `ruff check` / `format --check` | Clean |
 | `tools/tiger_reconcile.py` | `RECONCILED=true` against the live Tiger paper account |

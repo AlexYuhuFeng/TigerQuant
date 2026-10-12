@@ -19,6 +19,7 @@ that were renamed away is exactly how a project convinces itself it is covered.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -30,10 +31,13 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 __all__ = [
+    "COLLECTED_COUNTS",
     "CRITICAL_CASES",
     "CaseStatus",
     "CriticalCase",
+    "DocumentedCount",
     "GateReport",
+    "check_documented_counts",
     "collect_node_ids",
     "verify_gates",
 ]
@@ -115,9 +119,114 @@ class CaseResult:
 
 
 @dataclass(frozen=True, slots=True)
+class DocumentedCount:
+    """A test count asserted in the status documents, and what a real run collected."""
+
+    label: str
+    #: The ``-m`` expression the documented command used, or "" for the whole suite.
+    marker: str
+    claimed: int
+    actual: int
+
+    @property
+    def matches(self) -> bool:
+        """Whether the document agrees with reality.
+
+        BOTH values must be real. -1 means "no record" or "no claim", and two absences are not an
+        agreement: without this, a missing document AND a missing collection record would compare
+        equal and report OK, which is the one outcome a gate must never produce.
+        """
+        if self.claimed < 0 or self.actual < 0:
+            return False
+        return self.claimed == self.actual
+
+    def describe(self) -> str:
+        verdict = "OK" if self.matches else "STALE"
+        return (
+            f"documented count [{verdict}] {self.label}: claims {self.claimed}, "
+            f"actual {self.actual}"
+        )
+
+
+#: Where the test run records what it collected. Written by the ``pytest_collection_finish`` hook
+#: in tests/conftest.py, because a CHILD pytest process does not complete in this environment --
+#: confirmed with both pipes and file redirection. A count from the run that actually happened is
+#: also the better fact: the documents are compared against real collection, not a hypothetical one.
+COLLECTED_COUNTS = Path("out/collected_counts.json")
+
+#: Which key in the record answers each documented command. The empty marker is the whole suite.
+_MARKER_KEYS: dict[str, str] = {
+    "": "total",
+    "not requires_db": "not_requires_db",
+    "requires_db": "requires_db",
+}
+
+#: The documented commands to verify, and the ``-m`` expression each uses. The label must match the
+#: text in the document, so a reworded line is noticed rather than silently unchecked.
+_DOCUMENTED_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("pytest -q", ""),
+    ('pytest -q -m "not requires_db"', "not requires_db"),
+    ("pytest -q -m requires_db", "requires_db"),
+)
+
+_COUNT_LINE = re.compile(r"\|\s*`(?P<label>pytest[^`]*)`[^|]*\|\s*\*\*(?P<count>\d+) passed\*\*")
+
+
+def _collect_count(marker: str, *, root: Path | None = None) -> int:
+    """How many tests the last REAL run collected for this marker. -1 when there is no record.
+
+    Read from a file rather than obtained by spawning pytest: subprocess execution does not
+    complete here. A missing record is -1, which cannot equal any real count, so an absent file
+    FAILS the check rather than passing it silently.
+    """
+    key = _MARKER_KEYS.get(marker)
+    if key is None:
+        return -1
+    base = root or REPO_ROOT
+    try:
+        loaded: object = json.loads((base / COLLECTED_COUNTS).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return -1
+    if not isinstance(loaded, dict):
+        return -1
+    value = loaded.get(key)
+    return int(value) if isinstance(value, int) else -1
+
+
+def check_documented_counts(*, root: Path | None = None) -> tuple[DocumentedCount, ...]:
+    """Compare the counts asserted in WORK_QUEUE.md against the last real test run.
+
+    The counts are HAND-MAINTAINED, and one was found several rounds stale -- a lost update in a
+    read-modify-write script over a shared document. Nothing detected it, because a stale test
+    count is not a test failure. This is the check that notices.
+    """
+    base = root or REPO_ROOT
+    try:
+        document = (base / "docs" / "WORK_QUEUE.md").read_text(encoding="utf-8")
+    except OSError:
+        return ()
+
+    claimed: dict[str, int] = {}
+    for match in _COUNT_LINE.finditer(document):
+        claimed[match.group("label").strip()] = int(match.group("count"))
+
+    return tuple(
+        DocumentedCount(
+            label=label,
+            marker=marker,
+            claimed=claimed.get(label, -1),
+            actual=_collect_count(marker, root=base),
+        )
+        for label, marker in _DOCUMENTED_COMMANDS
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class GateReport:
     results: tuple[CaseResult, ...] = ()
     note: str = ""
+    #: Test counts the status documents assert, checked against the last real run.
+    counts: tuple[DocumentedCount, ...] = ()
 
     @property
     def proven(self) -> tuple[CaseResult, ...]:
@@ -139,7 +248,9 @@ class GateReport:
         that fails on every honest gap is a gate that gets disabled. What must never pass is a case
         with nothing behind it.
         """
-        return not self.unproven
+        # A stale documented count FAILS the report. It is a claim about this repository, and a
+        # claim nothing checks is a claim that rots -- which is exactly what happened.
+        return not self.unproven and all(count.matches for count in self.counts)
 
     def summary(self) -> str:
         total = len(self.results)
@@ -149,6 +260,9 @@ class GateReport:
         ]
         if self.note:
             lines.append(self.note)
+        stale = [count for count in self.counts if not count.matches]
+        if stale:
+            lines.append(f"STALE DOCUMENTED COUNTS: {len(stale)}")
         return "; ".join(lines)
 
     def render(self) -> str:
@@ -164,6 +278,9 @@ class GateReport:
             lines.append(
                 f"PARTIAL ({len(self.partial)}): proven in part, with the gap named above."
             )
+        if self.counts:
+            lines.append("")
+            lines.extend(count.describe() for count in self.counts)
         return "\n".join(lines)
 
 
@@ -364,11 +481,13 @@ def verify_gates(
     Running them is `pytest`'s job and `--run` does it.
     """
     selected = tuple(cases) if cases is not None else CRITICAL_CASES
+    counts = check_documented_counts(root=root)
     collected = collect_node_ids(root=root)
     if not collected:
         return GateReport(
             results=tuple(CaseResult(case=case, status=case.claimed) for case in selected),
             note="COULD NOT COLLECT TESTS: statuses below are the CLAIMED ones, not verified ones",
+            counts=counts,
         )
 
     results = []
@@ -376,4 +495,4 @@ def verify_gates(
         present = tuple(node for node in case.tests if _covers(node, collected))
         missing = tuple(node for node in case.tests if not _covers(node, collected))
         results.append(CaseResult(case=case, status=case.claimed, present=present, missing=missing))
-    return GateReport(results=tuple(results))
+    return GateReport(results=tuple(results), counts=counts)

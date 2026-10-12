@@ -1,0 +1,117 @@
+TigerQuant evidence - documented test counts are now verified against a real run
+Generated: see the git commit this file was added in
+
+Closes the stale-count gap found two rounds ago, after one failed attempt and a revert. The
+documents can no longer rot silently.
+
+===========================================================================
+1. The defect
+===========================================================================
+`docs/WORK_QUEUE.md` read "**731 passed**" for several rounds. The cause: status updates are
+read-modify-write scripts over a shared document, and one wrote back a copy read before another had
+updated it -- a classic lost update.
+
+**Nothing detected it, because a stale test count is not a test failure.** The document is prose,
+and prose was not checked.
+
+===========================================================================
+2. Why the first attempt failed
+===========================================================================
+The obvious design -- have `gates` spawn `pytest --collect-only` to learn the real counts -- HANGS
+in this environment. Confirmed twice: with `capture_output=True`, and with the child's stdout
+redirected to a FILE. So it is not the piped-stdio boundary; **subprocess execution itself does not
+complete here.**
+
+The second attempt moved the counts to a `pytest_collection_finish` hook, which was the right
+instinct, but produced `total=1045` (actual 1065) and `requires_db=0` (actual 20). Reverted.
+
+===========================================================================
+3. What actually works, and is better than the original design
+===========================================================================
+A `pytest_collection_finish` hook in `tests/conftest.py` records what collection saw:
+
+    {"total": 1069, "not_requires_db": 1049, "requires_db": 20,
+     "by_marker": {"fault": 20, "integration": 41, "parametrize": 49,
+                   "requires_db": 20, "requires_engine": 23}, "written_at": "..."}
+
+`tigerquant gates` reads that file and compares it against the counts the documents assert.
+
+**This is a better fact than the original design would have produced.** The documents are compared
+against the run that ACTUALLY HAPPENED, not against a hypothetical second collection by a second
+interpreter.
+
+    $ python -m tigerquant gates
+    documented count [OK] pytest -q: claims 1069, actual 1069
+    documented count [OK] pytest -q -m "not requires_db": claims 1049, actual 1049
+    documented count [OK] pytest -q -m requires_db: claims 20, actual 20
+
+===========================================================================
+4. Three defects found while building it
+===========================================================================
+**A. Two absences compared equal.** The first `matches` was `self.claimed == self.actual`. Both are
+`-1` when the document is missing AND the record is missing -- so a totally absent check would
+report OK. **That is the one outcome a gate must never produce.** `matches` now requires BOTH
+values to be real.
+
+**B. A subset run clobbered the record.** Running one test file overwrote the collection record
+with that subset's count, so the full-suite claims were compared against a fragment and reported as
+stale when they were correct. The hook now writes ONLY on a full-suite invocation, and a test
+asserts that a single-file run leaves the record intact.
+
+**C. The `render()` patch silently did not land**, so the counts were computed, correct and
+INVISIBLE. The JSON and the exit code were right while the human-readable report omitted the
+section entirely. Found by asserting on the rendered text rather than on the underlying data.
+
+===========================================================================
+5. Proven against the exact historical failure
+===========================================================================
+Restoring the value that went unnoticed for several rounds:
+
+    $ # docs/WORK_QUEUE.md set back to "731 passed"
+    RESULT ok: False | STALE DOCUMENTED COUNTS: 1
+    documented count [STALE] pytest -q: claims 731, actual 1069
+
+And a missing record is a FAILURE, not a pass:
+
+    RESULT ok: False   documented count [STALE] pytest -q: claims 1069, actual -1
+
+`-1` cannot equal any real count, so an absent file fails rather than defaulting to success.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+1069 passed
+
+$ python -m pytest tests/unit/test_documented_counts.py -q
+25 passed
+
+$ python -m tigerquant gates
+exit 0
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success. No issues found in 102 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. **The record is written by a TEST RUN, not by reading the code.** On a fresh checkout with no
+   test run yet, `out/collected_counts.json` does not exist and every documented count reads as
+   stale. That is the safe direction -- it fails loudly rather than passing -- but it means `gates`
+   is only meaningful after `pytest` has run at least once.
+2. The full-suite detection is a heuristic on the invocation arguments (`tests`, `tests/`, or
+   none). A run invoked as `pytest .` or through a wrapper would be treated as a subset and would
+   not record. It errs toward NOT recording, which leaves the previous record in place rather than
+   corrupting it.
+3. `collect_node_ids` -- used for the SIXTEEN critical cases, not the counts -- still spawns pytest.
+   It works from the CLI, but the same call hung in an earlier probe, so it is not obviously safe
+   in every context. The count check deliberately does not depend on it.
+4. Markers are counted per item, so a test carrying two of the tracked markers is counted in both.
+   Correct for the three documented commands; it would need care if a future command used a
+   compound expression.
+5. The counts are still HAND-EDITED when they change; the check verifies the edit, it does not make
+   it. A developer who adds tests must run the suite and update the document, and will be told
+   loudly if they forget.

@@ -261,3 +261,52 @@ __all__ = [
     "ReasonCode",
     "allow_risk",
 ]
+
+
+def pytest_collection_finish(session: object) -> None:
+    """Record what collection actually saw, for `tigerquant gates` to check the documents against.
+
+    A CHILD pytest process does not complete in this environment, so the counts cannot be obtained
+    by asking a second interpreter. Taking them from the run that actually happened is also the
+    better fact: the documented numbers are compared against real collection, not a hypothetical
+    one.
+
+    Markers are read per item. A module-level `pytestmark` IS reported by `iter_markers()`, which a
+    probe confirmed for the twenty `requires_db` tests before this was written.
+    """
+    import datetime as dt
+    import json
+    from pathlib import Path
+
+    # ONLY a full-suite run may write the record. Running a single file would otherwise clobber
+    # it, and the documented counts describe the WHOLE suite -- so the check would start comparing
+    # full-suite claims against a subset and report a stale count that was never stale. Found by
+    # running one test file after the count check was working.
+    args = [str(arg) for arg in getattr(getattr(session, "config", None), "args", []) or []]
+    full_suite = not args or all(arg in {"tests", "tests/"} for arg in args)
+    if not full_suite:
+        return
+
+    items = list(getattr(session, "items", []) or [])
+    by_marker: dict[str, int] = {}
+    for item in items:
+        iterator = getattr(item, "iter_markers", None)
+        found = [mark.name for mark in iterator()] if callable(iterator) else []
+        for name in set(found):
+            by_marker[name] = by_marker.get(name, 0) + 1
+
+    total = len(items)
+    requires_db = by_marker.get("requires_db", 0)
+    payload = {
+        "total": total,
+        "requires_db": requires_db,
+        "not_requires_db": total - requires_db,
+        "written_at": dt.datetime.now(tz=dt.UTC).isoformat(),
+        "by_marker": dict(sorted(by_marker.items())),
+    }
+
+    out = Path("out")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "collected_counts.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
