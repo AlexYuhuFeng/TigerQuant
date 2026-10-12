@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: reconnect the repository on backoff; CR-03 awaits the owner's consent
+Current CR: mode-to-role validation; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -970,6 +970,38 @@ halted with `transient_exhausted` after exactly 8.
 **The most important remaining gap, recorded as a limitation:** a backoff retry re-reads the
 journal but REUSES the held repository connection, so against a database that actually restarted
 the retry would fail again for a reason the backoff cannot fix.
+
+### 2026-10-12 - CR-09 part 15: reconnecting the repository, not just the cycle
+
+Full evidence: `docs/evidence/cr09_reconnect.txt`. New `db/reconnect.py`, 20 tests.
+
+**The gap was the worst shape of defect.** The backoff tier retried the CYCLE while the monitor
+held the original connection, so against a database that had ACTUALLY RESTARTED -- the case backoff
+exists for -- every retry failed identically and the loop halted having never once tried a fresh
+connection. **The retry logic was correct, its tests passed, and it could not have worked in the
+one situation it was built for.** Nothing short of a real restart would have revealed it.
+
+**`ReconnectingRepository` lives in `db/`, not in the supervisor**, because the supervisor
+supervises a CALLABLE and knows nothing about databases. Making the repository reconnect underneath
+keeps that boundary -- the monitor, the cycle and the supervisor all needed **no changes**. One new
+module, one wiring line.
+
+**It reconnects on the NEXT call and propagates the failure UNCHANGED**, so the supervisor's
+classifier still sees the real exception rather than a proxy's opinion of it. Reconnecting inside
+the failing call would hide the failure from the backoff accounting.
+
+**A non-connection failure does not drop the connection** -- one bad query must not become a
+reconnect storm -- and the `is_dead` predicate is INJECTED, so the proxy does not hardcode what a
+dead connection looks like.
+
+**The proxy is lazy, and that caught my own tests.** Six of the first twenty failed with
+`IndexError` because they killed `connections[0]` before making a call, and no connection existed
+yet. **The tests were wrong and the design was right** -- worth recording because the failure
+looked like a bug in the proxy. `_select_repository` primes it at startup anyway, so a bad DSN is
+still reported before the loop begins.
+
+`reconnects` is reported on the command line, because "it recovered" and "it never actually
+dropped" are different claims.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

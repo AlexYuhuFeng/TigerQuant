@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tigerquant.core.enums import Mode
+from tigerquant.db.reconnect import ReconnectingRepository
 from tigerquant.ops.alerts import AlertRouter
 from tigerquant.ops.supervisor import (
     BackoffPolicy,
@@ -165,6 +166,12 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             "reporting bad news, not a failing supervisor."
         )
     print(f"  monitor history: {len(monitor.history)} check(s)")
+    reconnects = getattr(repository, "reconnects", None)
+    if reconnects:
+        print(
+            f"  reconnections   {reconnects} (the database dropped and the loop recovered; "
+            "without this the retries would have used the same dead connection)"
+        )
 
     if connection is not None:
         # The driver's connection type is not imported here on purpose -- the db extra is
@@ -245,7 +252,29 @@ def _select_repository(
             file=sys.stderr,
         )
         return None, None, 2
-    return connection, PostgresRepository(connection, mode=Mode(args.mode)), None
+    # A RECONNECTING proxy, not a bare repository. Without it the backoff tier retried the cycle
+    # against the SAME dead connection, so against a database that had actually restarted -- the
+    # case backoff exists for -- every retry failed identically and the loop halted having never
+    # once tried a fresh connection.
+    proxy = ReconnectingRepository(
+        lambda: connect(dsn),
+        lambda live: PostgresRepository(live, mode=Mode(args.mode)),
+        is_dead=is_transient_failure,
+    )
+    # Prime it, so a bad DSN is reported at STARTUP rather than on the first cycle. A supervisor
+    # that appears to start and then immediately halts is worse than one that refuses to start.
+    try:
+        proxy._ensure()
+    except (IntegrationUnavailable, TigerQuantError) as exc:
+        print(f"cannot reach the database: {exc}", file=sys.stderr)
+        return None, None, 2
+    except Exception as exc:  # noqa: BLE001 - the driver's hierarchy is its own
+        print(
+            f"cannot reach the database: {type(exc).__name__}: {str(exc)[:200]}",
+            file=sys.stderr,
+        )
+        return None, None, 2
+    return connection, proxy, None
 
 
 def _run_supervisor(supervisor: Supervisor) -> SupervisorReport:

@@ -1,0 +1,116 @@
+TigerQuant CR-09 evidence (part 15) - reconnecting the repository, not just the cycle
+Generated: see the git commit this file was added in
+
+Closes the limitation part 14 recorded as "the most important remaining gap": a backoff retry
+re-read the journal but REUSED the held repository connection.
+
+===========================================================================
+1. The gap, and why it mattered more than it looked
+===========================================================================
+The backoff tier retried the CYCLE. The monitor held the original connection. So against a
+database that had ACTUALLY RESTARTED -- which is the case backoff exists for -- every retry failed
+identically, and the loop halted after exhausting its budget having never once tried a fresh
+connection.
+
+That is the worst shape of defect: the retry logic was correct, its tests passed, and it could not
+have worked in the one situation it was built for. Nothing short of a real restart would have
+revealed it.
+
+===========================================================================
+2. The fix, and where it lives
+===========================================================================
+`db/reconnect.py` adds `ReconnectingRepository`: a proxy over `(connect, repository_for)` that
+drops its connection after a connection-shaped failure, so the NEXT call reconnects.
+
+It lives there rather than in the supervisor because **the supervisor supervises a CALLABLE and
+knows nothing about databases**. Making the repository reconnect underneath keeps that boundary --
+the monitor, the cycle and the supervisor all needed NO changes. One new module, one wiring line.
+
+Two decisions shape it, and both are tested:
+
+**It reconnects on the NEXT call, not during the failing one.** The failure is propagated
+UNCHANGED, so the supervisor's classifier still sees the real exception rather than a substitute,
+and backoff is not deciding on a proxy's opinion. Reconnecting inside the call would also hide the
+failure from the backoff accounting and could block for an unbounded time inside a single cycle.
+
+**It delegates by ATTRIBUTE rather than subclassing the repository.** The concrete repository lives
+in a module that needs the optional `db` extra; this one must import without it, so it cannot name
+the type it wraps. A test asserts the module contains no driver import.
+
+**A non-connection failure does not drop the connection.** A query that returns the wrong thing is
+not a reason to reconnect, and dropping on every error would turn one bad query into a reconnect
+storm. The `is_dead` predicate is INJECTED, so the proxy does not hardcode what a dead connection
+looks like -- that is the driver's business.
+
+`reconnects` is exposed and reported on the command line, because "it recovered" and "it never
+actually dropped" are different claims and an operator cannot tell them apart from a green exit.
+
+===========================================================================
+3. The proxy is LAZY, and that caught my own tests
+===========================================================================
+Nothing connects until the first call. Six of the first twenty tests failed with
+`IndexError: list index out of range` because they killed `connections[0]` BEFORE making a call --
+and no connection existed yet.
+
+The tests were wrong and the design was right, which is worth recording because the failure looked
+like a bug in the proxy. A supervisor that connected at construction would also fail before it
+could report WHY it failed, which is the argument for laziness.
+
+`_select_repository` primes the proxy at startup anyway, so a bad DSN is still reported before the
+loop begins -- a supervisor that appears to start and then immediately halts is worse than one that
+refuses to start.
+
+===========================================================================
+4. Observed
+===========================================================================
+    $ tigerquant supervise out/rc/j.jsonl --dsn "postgresql://tq_backtest:.../tq_backtest" \
+        --iterations 2 --interval 0.01
+    database          PostgreSQL via PostgresRepository
+    supervisor: 2 cycle(s), 2 ok, 0 failed; worst severity WARNING; stopped normally
+      digest sha256:75154c0c1c16a2563b3be08ec7337474aa8edbb3adb1e93afccc8f377f12f0be
+
+    $ ... --dsn "postgresql://nope:nope@127.0.0.1:1/none?connect_timeout=2"
+    cannot reach the database: ConnectionTimeout: connection timeout expired      (exit 2)
+
+And the property that actually matters, exercised directly: kill the connection, call once (raises
+unchanged, disconnects), call again -- and the second call reaches a FRESH connection, with
+`reconnects == 1`.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+959 passed
+
+$ python -m pytest tests/unit/test_db_reconnect.py -q
+20 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 100 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **The reconnect is proven with a synthetic connection, not a real database restart.** The
+   unit tests kill a fake connection and show the next call reconnects. Nothing here stops and
+   starts the actual container mid-run. That is the honest boundary of this evidence: the LOGIC is
+   tested, the INTEGRATION is not.
+2. A reconnecting proxy makes `mode`-to-role validation harder to reason about, and that validation
+   is still absent: passing a PAPER DSN while running `--mode BACKTEST` would reconcile the wrong
+   database and be reported as consistent.
+3. `ReconnectingRepository.__getattr__` wraps every callable it returns, so each delegated call
+   pays a try/except and a closure. Negligible at a 30-second cadence; it would matter in a tight
+   loop.
+4. No reconnect limit of its own. It reconnects on every call after a failure; the ceiling comes
+   from the supervisor's `max_attempts`, which is the right place for it, but a caller using the
+   proxy directly has no bound.
+5. The proxy holds ONE connection. Concurrent use from threads would interleave on it, and there is
+   no lock.
+6. Nothing verifies the reconnected session sees the same data (schema version, search_path, role
+   grants). A reconnect that silently lands on a different database would be reported as healthy.
