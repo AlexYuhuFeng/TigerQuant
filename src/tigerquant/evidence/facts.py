@@ -22,7 +22,17 @@ from tigerquant.events.base import AwareUTC, NonEmptyStr
 
 __all__ = ["Fact", "FactKind", "fact_id_for"]
 
-#: Categories known to the CR-01 slice. CR-05 adds news, filings and macro series.
+#: Every category this project recognises.
+#:
+#: MUST match `DEFAULT_STALENESS.per_category` in both directions, and a test asserts it. It did not:
+#: `filing_event` was added to the policy and not here, and `derived_feature` never was. Two lists
+#: that are supposed to describe the same thing, with nothing comparing them.
+#:
+#: NOTE: this constant is currently EXPORTED AND NOT ENFORCED. Nothing validates a fact's category
+#: against it, so a typo silently gets the conservative staleness default -- the same shape of defect
+#: as the one it was just corrected for. Wiring it into `Fact` would reject unknown categories, which
+#: is the right behaviour and a change with real blast radius; recorded as a limitation rather than
+#: made late in a round.
 KNOWN_CATEGORIES: frozenset[str] = frozenset(
     {
         "price_bar",
@@ -31,6 +41,8 @@ KNOWN_CATEGORIES: frozenset[str] = frozenset(
         "calendar_session",
         "news_claim",
         "filing_claim",
+        "filing_event",
+        "derived_feature",
     }
 )
 

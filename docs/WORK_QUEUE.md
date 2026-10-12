@@ -40,8 +40,8 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **1120 passed** |
-| `pytest -q -m "not requires_db"` | **1100 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **1139 passed** |
+| `pytest -q -m "not requires_db"` | **1119 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
 
 **The counts above are VERIFIED by `tigerquant gates`** against a record written by the last full test run. See `docs/evidence/documented_counts_verified.txt`.

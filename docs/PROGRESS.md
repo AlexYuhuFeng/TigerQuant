@@ -1301,6 +1301,42 @@ only enforces that it is no looser than the LOOSEST category. **The docstring cl
 code does not provide.** Bounded in effect, now asserted in both directions rather than silently
 corrected in the test, and left unfixed because either fix has a real blast radius.
 
+### 2026-10-12 - The same defect for the third time, so the COMPARISON is now tested
+
+Full evidence: `docs/evidence/category_consistency.txt`. 19 tests. **No new feature.** What this
+round produced is a test that closes a whole CLASS of defect rather than the instance visible at the
+time.
+
+**The pattern, three times.**
+
+- **Round 34.** The pipeline emitted categories derived from source-kind names (`OFFICIAL_FILING`,
+  `NEWS_WIRE`) which appeared nowhere in `DEFAULT_STALENESS.per_category`. Every ingested fact fell
+  through to the 60-second default and the policy's thirty-day filing horizon was consulted by
+  nothing.
+- **Round 35 / this round.** `KNOWN_CATEGORIES` was missing `filing_event` (added to the policy a
+  round earlier) and `derived_feature` (never added). It is also **exported and never consumed** -- a
+  constant that looks like validation and validates nothing.
+- **And four policy categories have no producer at all.**
+
+Each is the same thing: **a list on one side of an interface disagreeing with a list on the other,
+with nothing comparing them.**
+
+**The corrections are three lines. The value is the comparison.** The policy's keys,
+`KNOWN_CATEGORIES`, the source-kind mapping and the set of categories a producer actually emits are
+now asserted equal, with failures that say which direction is wrong. The reserved set is an EXACT
+equality: **adding a horizon with nothing to use it now fails the suite and says so.**
+
+`PRODUCED_BY_EVIDENCE_INGESTION` is written out **explicitly rather than derived** -- "which
+producers exist" is a fact about the code that a test should state out loud, and a derived set would
+move with the code, which is exactly how last round's test came to encode a defect.
+
+**A limitation asserted rather than described.** `KNOWN_CATEGORIES` is still not enforced, so a
+typo is stored and silently takes the conservative default -- the same shape as the defect it was
+just corrected for. The tests state that as a FACT: one asserts the constant is absent from `Fact`,
+another **builds a fact with a deliberate typo** and shows it is accepted. Wiring it in is the right
+change and has real blast radius (existing tests use `"earnings"`), so it is recorded rather than
+made late in a round.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.

@@ -1,0 +1,107 @@
+TigerQuant evidence - the same defect for the third time, so the COMPARISON is now tested
+Generated: see the git commit this file was added in
+
+19 tests. No new feature. What this round produced is a test that closes a whole class of defect
+rather than the instance of it that happened to be visible.
+
+===========================================================================
+1. The pattern, found three times
+===========================================================================
+**Round 34.** The pipeline emitted categories derived from SOURCE KIND NAMES -- `OFFICIAL_FILING`,
+`NEWS_WIRE` -- which appeared NOWHERE in `DEFAULT_STALENESS.per_category`. Every ingested fact fell
+through to the 60-second default, and the policy's thirty-day filing horizon was consulted by
+nothing. Silent, because a fact that reads as stale looks exactly like a fact that IS stale.
+
+**Round 35, this round.** `KNOWN_CATEGORIES` was missing `filing_event` -- added to the policy a
+round earlier -- and `derived_feature`, which never was. It is ALSO **exported and never consumed**:
+a constant that looks like validation and validates nothing.
+
+**And four policy categories have no producer at all.**
+
+Each is the same thing: **a list on one side of an interface disagreeing with a list on the other,
+with nothing comparing them.** Three instances, three different lists.
+
+===========================================================================
+2. What was corrected
+===========================================================================
+`KNOWN_CATEGORIES` now matches `DEFAULT_STALENESS.per_category` exactly -- asserted in BOTH
+directions, so neither a stale entry nor a missing one can hide.
+
+The four unproduced categories are now NAMED rather than left to be discovered:
+`quote`, `calendar_session` (reserved: a deployment may hold a horizon for a feed it has not
+connected) and the two the drift was about.
+
+===========================================================================
+3. What was actually built: the comparison
+===========================================================================
+The corrections are three lines. The value is that the four lists -- the policy's keys,
+`KNOWN_CATEGORIES`, the source-kind mapping, and the set of categories a producer actually emits --
+are now asserted equal to each other, with a failure message saying WHICH direction is wrong.
+
+    test_known_categories_matches_the_policy_exactly
+    test_neither_side_has_an_entry_the_other_lacks
+    test_every_produced_category_is_known_and_has_a_horizon
+    test_every_mapped_source_category_is_known
+    test_the_reserved_set_is_exactly_the_unproduced_ones
+
+`PRODUCED_BY_EVIDENCE_INGESTION` and `PRODUCED_ELSEWHERE` are written out EXPLICITLY rather than
+derived, because "which producers exist" is a fact about the code that a test should state out loud.
+A derived set would move with the code, which is the failure mode of the test that encoded last
+round's defect.
+
+The reserved set is asserted as an EXACT equality, not a subset. Adding a horizon with nothing to
+use it now fails the suite and says so.
+
+===========================================================================
+4. A limitation asserted rather than described
+===========================================================================
+`KNOWN_CATEGORIES` is still **not enforced**: nothing validates a fact's category against it, so a
+typo is stored and silently takes the conservative default. That is the same shape of defect as the
+one it was just corrected for.
+
+The tests state this as a FACT rather than leaving it implied:
+
+    test_nothing_validates_a_fact_category_against_it   -- asserts the constant is NOT in Fact
+    test_a_fact_with_an_unknown_category_is_accepted_today -- builds one, with a deliberate typo
+
+Wiring it into `Fact` would reject unknown categories, which is the right behaviour and a change
+with real blast radius -- `tests/unit/test_evidence_connectors.py` uses `"earnings"`, which is not a
+known category. Recorded rather than made late in a round, and asserted so that wiring it later is a
+deliberate change rather than a silent one.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+1139 passed
+
+$ python -m pytest tests/unit/test_category_consistency.py -q
+19 passed
+
+$ python -m tigerquant gates
+critical test cases: 14/16 proven, 2 partial, 0 unproven
+documented count [OK] pytest -q: claims 1139, actual 1139
+documented count [OK] pytest -q -m "not requires_db": claims 1119, actual 1119
+documented count [OK] pytest -q -m requires_db: claims 20, actual 20
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success. No issues found in 102 source files
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **The comparison covers categories only.** The same pattern could exist for `ReasonCode` members,
+   `FactKind` values, `Mode` capabilities or metric names, and nothing checks those. Extending the
+   pattern is obvious work and was not done.
+2. `PRODUCED_BY_EVIDENCE_INGESTION` is hand-maintained. If a new producer appears, the set does not
+   grow with it, and the reserved-set assertion would fail -- loudly, which is the right direction,
+   but it is a manual step.
+3. `KNOWN_CATEGORIES` remains unenforced, as set out above. A typo'd category is accepted today.
+4. `quote` and `calendar_session` are called "reserved" on my judgement. No document says a quote
+   feed is planned; I inferred it from the fact that `MarketQuote` and a calendar module both exist.
+   If neither is intended, those are two horizons that should be deleted rather than reserved.
+5. Nothing here addresses whether the HORIZONS are right. Thirty days for a 10-Q remains my
+   judgement.
