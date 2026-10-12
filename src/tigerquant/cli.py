@@ -30,6 +30,7 @@ from tigerquant.market.fixtures import load_scenario
 from tigerquant.ops.alert_cli import cmd_alerts
 from tigerquant.ops.dashboard import DashboardServer, build_app
 from tigerquant.ops.drift_monitor import DriftMonitor
+from tigerquant.ops.gates import verify_gates
 from tigerquant.ops.lineage_report import build_lineage, export
 from tigerquant.ops.metrics_report import attribution_by_decision, measure_session
 from tigerquant.ops.settings import (
@@ -310,6 +311,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_settings_parsers(sub)
     _add_alerts_parsers(sub)
+    gates = sub.add_parser(
+        "gates",
+        help=(
+            "verify the critical test cases in docs/ACCEPTANCE_GATES.md: which are PROVEN, "
+            "which are PARTIAL with a named gap, and which have NOTHING behind them"
+        ),
+    )
+    gates.add_argument(
+        "--json", action="store_true", help="emit JSON instead of the rendered report"
+    )
     supervise_parser(sub)
     return parser
 
@@ -399,6 +410,45 @@ def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
             "either way."
         ),
     )
+
+
+def _cmd_gates(args: argparse.Namespace) -> int:
+    """Report which critical test cases are actually backed by tests.
+
+    Exit 1 when any case has NOTHING behind it. PARTIAL does not fail the command: a case with a
+    named gap is an honest state, and a gate that fails on every honest gap is a gate that gets
+    disabled. What must never pass silently is a case with no evidence at all.
+    """
+    report = verify_gates()
+    if args.json:
+        import json
+
+        print(
+            json.dumps(
+                {
+                    "summary": report.summary(),
+                    "proven": [result.case.number for result in report.proven],
+                    "partial": [result.case.number for result in report.partial],
+                    "unproven": [result.case.number for result in report.unproven],
+                    "cases": [
+                        {
+                            "number": result.case.number,
+                            "status": result.effective_status,
+                            "summary": result.case.summary,
+                            "missing": list(result.missing),
+                            "gap": result.case.gap,
+                            "caveat": result.case.caveat,
+                        }
+                        for result in report.results
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(report.render())
+    return 0 if report.ok else 1
 
 
 def _cmd_drift(args: argparse.Namespace) -> int:
@@ -895,6 +945,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "metrics": _cmd_metrics,
         "settings": _cmd_settings,
         "alerts": cmd_alerts,
+        "gates": _cmd_gates,
         "supervise": cmd_supervise,
         "verify-journal": _cmd_verify,
         "doctor": _cmd_doctor,

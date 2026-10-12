@@ -1,0 +1,100 @@
+TigerQuant evidence - the acceptance gates are now machine-checkable
+Generated: see the git commit this file was added in
+
+New module `ops/gates.py` and the `tigerquant gates` command. Until now every round ended with me
+ASSERTING "the gates are met" in prose, in a progress file. That claim was never checkable.
+
+===========================================================================
+1. What it does
+===========================================================================
+Each of the sixteen critical test cases in docs/ACCEPTANCE_GATES.md maps to the ACTUAL pytest node
+ids that prove it, and the command reports which are proven, which are partial with a named gap,
+and which have nothing behind them.
+
+    $ python -m tigerquant gates
+    critical test cases: 14/16 proven, 2 partial, 0 unproven
+
+    case  1 [PROVEN  ] paper account is PAPER type; a forged/live account refuses all order calls
+           caveat: exercised against the broker response SHAPES CR-02 observed, not a live API
+    case  2 [PROVEN  ] the LLM cannot reach TradeClient.place_order through its tool boundary
+    ...
+    case  4 [PARTIAL ] order times out after acceptance: no blind retry; reconcile or quarantine
+           gap: the timeout path is exercised against the fake broker and the adapter's reconcile;
+           NO real broker timeout has been observed, because no order has ever been submitted
+
+Exit 0 when nothing is unproven, 1 when something is. PARTIAL does NOT fail the command: a case
+with a NAMED gap is an honest state, and **a gate that fails on every honest gap is a gate that
+gets disabled** -- which protects nothing. What must never pass silently is a case with no evidence.
+
+===========================================================================
+2. THE MODULE CAUGHT ITS OWN AUTHOR, TWICE, ON THE FIRST RUN
+===========================================================================
+**Ten mapped test files did not exist.** I wrote plausible filenames from memory instead of reading
+the suite, and missed an entire `tests/fault/` failure-injection directory where most of the cases
+are actually proven -- the suite AGENTS.md requires from CR-02 onward, which I had forgotten existed.
+
+Then, having fixed the filenames, **every `tests/fault/` id was still rejected**, because the ids
+omitted class names: the real node is
+`test_failure_injection.py::TestRiskFailures::test_stale_price_fails_closed`, not
+`...::test_stale_price_fails_closed`. The tool was right both times.
+
+That is the exact failure the module exists to catch, and it is worth stating plainly: **the person
+writing the coverage table is the least reliable source of truth about it, and this caught me
+within seconds of being written.**
+
+===========================================================================
+3. And it caught a defect in its own logic
+===========================================================================
+The first version reported **"14/16 proven" while printing `MISSING TEST(S)` beneath ten of them.**
+The status came from the table's claim alone and ignored whether the mapped tests existed, so the
+report contradicted its own evidence on the same screen.
+
+The docstring promised that a gap "renders as UNPROVEN, never as passing", and the code did not do
+it. **A coverage report that overstates coverage is worse than no report at all**, because it
+removes the reason to look. Fixed with an `effective_status` that accounts for the missing tests,
+derived in ONE place so the summary, the counts and the rendered lines cannot disagree.
+
+===========================================================================
+4. Test results
+===========================================================================
+$ python -m pytest tests -q
+1044 passed
+
+$ python -m pytest tests/unit/test_gates.py -q
+36 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success. No issues found in 102 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+===========================================================================
+5. The two PARTIAL cases, named
+===========================================================================
+**Case 4, order timeout.** The timeout path is exercised against the fake broker and the adapter's
+reconcile. NO real broker timeout has been observed, because no order has ever been submitted.
+
+**Case 11, provider resilience.** The provider paths are exercised with FAKES. NO real provider call
+has been made, so no real latency, real outage or real version change has been observed.
+
+Both are blocked on the same two external decisions as CR-03 and CR-06. Neither is a code gap.
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **It checks that mapped tests EXIST, not that they pass.** Running them is pytest's job; the
+   `--json` output is intended for a CI job that does both. A green `gates` run alongside a failing
+   suite would be misleading, and the command says so in its help text rather than implying more.
+2. The mapping is HAND-WRITTEN, so it encodes my judgement about which test proves which case. The
+   tool verifies the tests exist; it cannot verify they are the RIGHT tests for the case.
+3. A file-level entry (`tests/unit/test_risk_gateway.py`) counts as covering a case if ANY test in
+   it exists. That is deliberate -- some cases are proven by a module -- but it is looser than a
+   node id.
+4. Sixteen cases are checked against `docs/ACCEPTANCE_GATES.md` as written today. If that document
+   gains a case, this mapping does not notice.
+5. `collect_node_ids` runs a full pytest collection, which takes seconds. Acceptable for a gate
+   command; it is not something to call in a loop.

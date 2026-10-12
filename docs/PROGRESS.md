@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: in-process hang detection; CR-03 awaits the owner's consent
+Current CR: gate verification is in place; CR-03 and CR-06 await the owner's decisions
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -1103,6 +1103,56 @@ turn a transient failover into an outage. Verification runs once per CONNECTION,
 **Honest boundary:** the scenario is proven with a SCRIPTED connection sequence, not a real
 failover. Nothing here stops a container, changes DNS, or moves a load balancer. The logic is
 tested; the integration is not.
+
+### 2026-10-12 - The acceptance gates become machine-checkable
+
+Full evidence: `docs/evidence/gate_verification.txt`. New `ops/gates.py` and the `tigerquant gates`
+command. **Until now every round ended with me ASSERTING "the gates are met" in prose.** That claim
+was never checkable.
+
+Each of the sixteen critical test cases maps to the actual pytest node ids that prove it:
+
+```
+$ python -m tigerquant gates
+critical test cases: 14/16 proven, 2 partial, 0 unproven
+```
+
+Exit 1 when any case has nothing behind it. **PARTIAL does NOT fail**: a case with a named gap is an
+honest state, and a gate that fails on every honest gap gets disabled -- which protects nothing.
+
+**THE MODULE CAUGHT ITS OWN AUTHOR, TWICE, ON THE FIRST RUN.** Ten mapped test files did not exist:
+I wrote plausible filenames from memory and **missed an entire `tests/fault/` failure-injection
+directory** where most of the cases are actually proven -- the suite AGENTS.md requires from CR-02
+onward, which I had forgotten existed. Then, having fixed the filenames, every `tests/fault/` id was
+still rejected because they omitted class names. The tool was right both times.
+
+**The person writing the coverage table is the least reliable source of truth about it**, and this
+caught me within seconds of being written.
+
+**And it caught a defect in its own logic.** The first version reported "14/16 proven" while printing
+`MISSING TEST(S)` beneath ten of them -- the status came from the table's claim alone and ignored
+whether the mapped tests existed, so the report contradicted its own evidence on one screen. The
+docstring promised a gap would "render as UNPROVEN, never as passing" and the code did not do it.
+**A coverage report that overstates coverage is worse than no report**, because it removes the
+reason to look. Fixed with a single `effective_status` so the summary, the counts and the rendered
+lines cannot disagree.
+
+**The two PARTIAL cases, named:** case 4 (order timeout) and case 11 (provider resilience). Both are
+exercised against fakes and neither has been seen against the real thing, because **no order has
+ever been submitted and no provider call has ever been made**. Both are blocked on the same two
+external decisions as CR-03 and CR-06 -- neither is a code gap.
+
+
+**A stale-count hazard found while updating the status table.** docs/WORK_QUEUE.md still read
+"**731 passed**", several rounds out of date. The cause is that these updates are read-modify-write
+scripts over a shared document, and one of them wrote back a copy read before another had updated
+it -- the classic lost update. Nothing detected it: a stale test count is not a test failure, and
+the document is prose.
+
+**What would catch it:** a check that the counts in WORK_QUEUE.md match a real run, which is now
+the natural job of 	igerquant gates -- it already collects the suite and knows how many tests
+exist. Until that exists the counts are hand-maintained and can rot silently, which is exactly what
+happened here.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

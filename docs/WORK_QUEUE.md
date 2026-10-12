@@ -40,8 +40,8 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **731 passed** |
-| `pytest -q -m "not requires_db"` | **640 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **1044 passed** |
+| `pytest -q -m "not requires_db"` | **1024 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
 | `mypy` (strict) | Success, 92 source files |
 | `ruff check` / `format --check` | Clean |
