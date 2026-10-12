@@ -1,0 +1,142 @@
+TigerQuant CR-05 evidence - the pipeline produced categories the policy did not name
+Generated: see the git commit this file was added in
+
+A defect found while closing the limitation recorded last round ("no staleness horizon is set for
+filings"). It was worse than that, and the real one was silent.
+
+===========================================================================
+1. The defect
+===========================================================================
+`DEFAULT_STALENESS` declares seven categories with carefully-chosen horizons:
+
+    news_claim        3,600s     one hour
+    filing_claim  2,592,000s     thirty days
+    ...
+
+The pipeline derived its category from the SOURCE KIND NAME -- `OFFICIAL_FILING`, `NEWS_WIRE` --
+which appears NOWHERE in that policy. So **every ingested fact fell through to the 60-second
+default**, and the two horizons the policy was written for were consulted by nothing:
+
+    OFFICIAL_FILING -> 60s
+    NEWS_WIRE       -> 60s
+    MARKET_DATA     -> 60s
+    BROKER          -> 60s
+    DERIVED         -> 60s
+    SYNTHETIC       -> 60s
+
+===========================================================================
+2. Why it mattered, and why it was silent
+===========================================================================
+Stale evidence BLOCKS TRADES (AGENTS.md invariant 4). So every ingested fact became unusable one
+minute after ingestion, and an operator who configured a thirty-day filing horizon would see it have
+no effect at all.
+
+**And the failure is silent.** A fact that reads as stale looks exactly like a fact that IS stale.
+There is no error, no warning, and nothing to notice -- a legitimate filing simply gets refused, and
+the reason given is truthful and misleading at the same time.
+
+This is the same shape as several defects already found in this project: a policy that looks
+configured and is not.
+
+===========================================================================
+3. The fix: one mapping, to the names the policy actually uses
+===========================================================================
+_SOURCE_KIND_TO_CATEGORY, with the SAME structure as the fact-kind mapping added two rounds ago --
+because the two defects are the same defect. A source's KIND determines both the epistemic status of
+its facts and their staleness category, and both were being decided by a name-shaped guess.
+
+    OFFICIAL_FILING -> filing_claim       (or filing_event, by form -- see below)
+    NEWS_WIRE       -> news_claim
+    BROKER          -> position_snapshot
+    DERIVED         -> derived_feature
+    MARKET_DATA, SYNTHETIC -> deliberately unmapped, taking the conservative default
+
+`MARKET_DATA` is left out on purpose: a market-data document is not necessarily a price bar, and
+guessing would be the same mistake in a new place.
+
+Observed after:
+
+    news_claim         ->     3,600s
+    filing_claim       -> 2,592,000s
+    filing_event       ->   604,800s
+
+===========================================================================
+4. Form-level granularity, and the `periodic` flag finally doing something
+===========================================================================
+A 10-K describes a PERIOD and stays useful for weeks; an 8-K announces a MOMENT and does not. One
+horizon for both is wrong in one direction or the other.
+
+`filing_document` has recorded a `periodic` flag since it was written, and **nothing consumed it
+until now**:
+
+    10-K, 10-Q            -> filing_claim   -> 2,592,000s   (30 days)
+    8-K, 4, SC 13D        -> filing_event   ->   604,800s   (7 days)
+
+===========================================================================
+5. A test that encoded the defect
+===========================================================================
+`test_a_clean_document_becomes_an_attributed_claim` asserted:
+
+    assert fact.category == "NEWS_WIRE"
+
+**The assertion encoded the bug.** It passed for as long as the bug existed, because it checked the
+value the code produced rather than the property that mattered. It now asserts `news_claim` AND that
+the policy resolves it to 3,600 seconds, with a comment saying why.
+
+That is the general lesson: a test that asserts what the code DOES will follow the code anywhere,
+including into a defect. A test that asserts what the code is FOR does not.
+
+===========================================================================
+6. A discrepancy found by my own failing assertion
+===========================================================================
+I wrote `assert default_seconds <= min(per_category.values())`, intending "the default is the most
+conservative value". It FAILED: the default is 60 and `position_snapshot` is 30.
+
+Checking why, the docstring says the default "must be the *most* conservative value a deployment is
+willing to accept", while the validator only enforces that it is no looser than the LOOSEST
+configured category. **Those are different rules**, and the docstring claims a guarantee the code
+does not provide -- the shape of defect this project keeps finding.
+
+The practical effect is bounded (an unmapped category gets 60 seconds rather than 30). It is now
+asserted in BOTH directions: the property the validator enforces, and the discrepancy with what the
+docstring claims, so it cannot drift further unnoticed rather than being silently corrected in the
+test.
+
+===========================================================================
+7. Test results
+===========================================================================
+$ python -m pytest tests -q
+1120 passed
+
+$ python -m pytest tests/unit/test_category_policy_link.py -q
+19 passed
+
+$ python -m tigerquant gates
+critical test cases: 14/16 proven, 2 partial, 0 unproven
+documented count [OK] pytest -q: claims 1120, actual 1120
+documented count [OK] pytest -q -m "not requires_db": claims 1100, actual 1100
+documented count [OK] pytest -q -m requires_db: claims 20, actual 20
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success. No issues found in 102 source files
+
+===========================================================================
+8. Limitations
+===========================================================================
+1. The new `test_every_mapped_category_exists_in_the_policy` checks that mapped categories are
+   NAMED by the policy. It cannot check that the HORIZONS are sensible -- that is a judgement, and
+   thirty days for a 10-Q is mine.
+2. `filing_event` at seven days is likewise my judgement, not a measurement. An 8-K about a
+   restatement arguably deserves longer than one about a routine officer change, and the form type
+   does not distinguish them.
+3. The docstring/validator discrepancy is now ASSERTED but not FIXED. Tightening the validator to
+   `min` would reject the current policy, and changing the default to 30 changes behaviour for
+   every unmapped category. Either is a small change with a real blast radius, and it deserves its
+   own round rather than being folded into this one.
+4. The category is still derived per SOURCE KIND and FORM TYPE, not per document. Two 8-Ks filed a
+   day apart share a horizon, which is right, but a document-level override remains impossible.
+5. No real filing has been fetched, so none of these horizons has been exercised against real
+   disclosure timing.

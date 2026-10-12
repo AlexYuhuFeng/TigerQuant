@@ -377,7 +377,7 @@ class IngestionPipeline:
         # The category is the source's KIND. A news wire and an official filing are different
         # categories with different freshness horizons, and the staleness policy is keyed by
         # category, so this is what makes the per-category horizons apply to ingested text.
-        category = _category_for(source)
+        category = _category_for(source, document)
         fact = Fact(
             fact_id=fact_id_for(
                 category=category,
@@ -419,9 +419,46 @@ class IngestionPipeline:
         return fact, bool(flags)
 
 
-def _category_for(source: Source) -> str:
-    """The staleness category for a source, derived from its declared kind."""
-    return str(getattr(source.kind, "value", source.kind)).upper()
+#: Which STALENESS category a document belongs to.
+#:
+#: These are the names `DEFAULT_STALENESS.per_category` uses. The first version derived the
+#: category from the source kind NAME -- `OFFICIAL_FILING`, `NEWS_WIRE` -- which appeared NOWHERE
+#: in that policy, so every ingested fact fell through to the 60-second default and the policy's
+#: thirty-day filing horizon was never consulted. Silent, because a fact that reads as stale looks
+#: like a fact that IS stale.
+#:
+#: Unmapped kinds deliberately fall through to the conservative default, which is the correct
+#: behaviour for a feed whose freshness nobody has reasoned about yet.
+_SOURCE_KIND_TO_CATEGORY: dict[SourceKind, str] = {
+    # A periodic report describes a period and stays useful for weeks.
+    SourceKind.OFFICIAL_FILING: "filing_claim",
+    SourceKind.NEWS_WIRE: "news_claim",
+    # Broker state is genuinely perishable, so the short horizon is right -- but it is stated
+    # rather than inherited by accident.
+    SourceKind.BROKER: "position_snapshot",
+    SourceKind.DERIVED: "derived_feature",
+    # MARKET_DATA and SYNTHETIC are deliberately absent: a market-data document is not necessarily
+    # a price bar, and a fixture has no freshness claim at all. Both take the conservative default.
+}
+
+
+def _category_for(source: Source, document: RawDocument | None = None) -> str:
+    """The staleness category for a document, derived from its source AND its form.
+
+    Form-level granularity matters for filings: a 10-K describes a period and is useful for weeks,
+    an 8-K announces a moment and is not. `filing_document` records `periodic` for exactly this, and
+    before now nothing consumed it.
+    """
+    category = _SOURCE_KIND_TO_CATEGORY.get(source.kind)
+    if category is None:
+        # Unmapped falls through to the conservative default, deliberately.
+        return str(getattr(source.kind, "value", source.kind)).upper()
+
+    if category == "filing_claim" and document is not None:
+        form = str(document.attributes.get("form_type", "")).strip().upper()
+        if form and form not in PERIODIC_FILING_FORMS:
+            return "filing_event"
+    return category
 
 
 def _staleness_deadline(policy: StalenessPolicy, category: str, now: dt.datetime) -> dt.datetime:

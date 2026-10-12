@@ -30,7 +30,7 @@ from tigerquant.evidence.connectors import (
 from tigerquant.evidence.durable import DurableFactStore
 from tigerquant.evidence.facts import FactKind
 from tigerquant.evidence.sources import default_test_registry
-from tigerquant.evidence.staleness import StalenessPolicy
+from tigerquant.evidence.staleness import DEFAULT_STALENESS, StalenessPolicy
 from tigerquant.evidence.store import EvidenceStore
 
 AT = dt.datetime(2026, 3, 2, 14, 40, tzinfo=dt.UTC)
@@ -120,7 +120,12 @@ class TestIngestion:
         assert report.rejections == ()
         fact = next(iter(store.iter_facts()))
         assert fact.kind is FactKind.ATTRIBUTED_CLAIM
-        assert fact.category == "NEWS_WIRE"
+        # news_claim, NOT the source-kind name. The category names the STALENESS horizon, and the
+        # policy has no entry called "NEWS_WIRE" -- so the old value fell through to the 60-second
+        # default and turned a one-hour news horizon into a one-minute one. The assertion encoded
+        # the defect.
+        assert fact.category == "news_claim"
+        assert DEFAULT_STALENESS.max_age_seconds(fact.category) == 3_600
         assert fact.source_id == WIRE
 
     def test_available_at_comes_from_the_injected_clock_not_the_source(

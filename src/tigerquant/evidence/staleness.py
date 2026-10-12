@@ -78,7 +78,8 @@ DEFAULT_STALENESS = StalenessPolicy(
         "position_snapshot": 30,
         "calendar_session": 86_400,
         "news_claim": 3_600,
-        "filing_claim": 2_592_000,  # 30 days
+        "filing_claim": 2_592_000,  # 30 days: a 10-K or 10-Q describes a period
+        "filing_event": 604_800,  # 7 days: an 8-K or Form 4 announces a moment
         "derived_feature": 900,
     },
 )

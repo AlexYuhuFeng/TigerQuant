@@ -1262,6 +1262,45 @@ PIPELINE, not a feed. And **no staleness horizon is set for filings yet** -- a 1
 the conservative default, the same horizon as a news article. That is safe and wrong in spirit;
 `PERIODIC_FILING_FORMS` records the distinction and no policy consumes it yet.
 
+### 2026-10-12 - CR-05: the pipeline produced categories the policy did not name
+
+Full evidence: `docs/evidence/cr05_category_policy_link.txt`. 19 tests. Found while closing last
+round's stated limitation, and **the real defect was worse and silent**.
+
+**The defect.** `DEFAULT_STALENESS` declares seven categories with chosen horizons -- `news_claim` at
+one hour, `filing_claim` at thirty days. The pipeline derived its category from the SOURCE KIND NAME
+(`OFFICIAL_FILING`, `NEWS_WIRE`), **which appears nowhere in that policy**. So every ingested fact
+fell through to the 60-second default, and the two horizons the policy was written for were
+consulted by nothing.
+
+**Why it mattered, and why nobody would notice.** Stale evidence BLOCKS TRADES (invariant 4), so
+every ingested fact became unusable one minute after ingestion -- and an operator who configured a
+thirty-day filing horizon would see it have no effect. **A fact that reads as stale looks exactly
+like a fact that IS stale.** No error, no warning; a legitimate filing simply gets refused, with a
+reason that is truthful and misleading at once.
+
+**The fix is the same shape as the fact-kind mapping two rounds ago**, because they are the same
+defect: a source's KIND determines both the epistemic status of its facts and their staleness
+category, and both were being decided by a name-shaped guess. `MARKET_DATA` is deliberately left
+unmapped -- a market-data document is not necessarily a price bar, and guessing would be the same
+mistake in a new place.
+
+**The `periodic` flag finally does something.** A 10-K describes a period and stays useful for weeks;
+an 8-K announces a moment and does not. The flag has been recorded since `filing_document` was
+written and **nothing consumed it until now**: periodic forms get 30 days, event forms 7.
+
+**A test encoded the defect.** `test_a_clean_document_becomes_an_attributed_claim` asserted
+`fact.category == "NEWS_WIRE"` -- the value the code produced, not the property that mattered. It
+passed for as long as the bug existed. **A test that asserts what the code DOES will follow the code
+anywhere, including into a defect.** It now asserts the category AND that the policy resolves it to
+3,600 seconds.
+
+**And my own failing assertion found a discrepancy.** I asserted the default is the most conservative
+value; it is not -- the docstring says it "must be the most conservative value", while the validator
+only enforces that it is no looser than the LOOSEST category. **The docstring claims a guarantee the
+code does not provide.** Bounded in effect, now asserted in both directions rather than silently
+corrected in the test, and left unfixed because either fix has a real blast radius.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
