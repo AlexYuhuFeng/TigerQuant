@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: wire the supervisor to PostgreSQL; CR-03 awaits the owner's consent
+Current CR: CR-09 offline work exhausted; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -904,6 +904,39 @@ Live run: 3 cycles, 3 ok, 0 failed, digest emitted, heartbeat on disk carrying t
 **Three rounds running, the determinism check has caught new code within seconds** -- `alert_cli.py`,
 `supervisor.py`, now `supervisor_cli.py`. Each went on the operational allow-list with its reason
 recorded rather than the rule being loosened.
+
+### 2026-10-12 - CR-09 part 13: the supervisor reconciles against PostgreSQL
+
+Full evidence: `docs/evidence/cr09_supervise_postgres.txt`. **This exhausts CR-09's offline work.**
+
+    $ python -m tigerquant supervise out/pg/j.jsonl --dsn "postgresql://tq_backtest:.../tq_backtest"
+    database          PostgreSQL via PostgresRepository
+    supervisor: 1 cycle(s), 1 ok, 0 failed; worst severity WARNING; stopped normally
+
+`--dsn` or `TIGERQUANT_DB_DSN` -- the SAME variable `tigerquant drift` already uses, so one setting
+covers both commands rather than two names for one thing.
+
+**A connection failure is a REFUSAL, never a fallback.** It exits 2 and reconciles nothing. A
+supervisor that appears to reconcile while actually comparing the journal against an empty dict is
+**worse** than one that will not start, because it reports health it has not checked -- precisely
+what invariant 11 forbids.
+
+**A defect found by hand:** pointing the command at an unreachable database produced a raw driver
+exception and **exit 1**, not the exit 2 the command intends. The `except` caught only this
+project's own error types and the driver raises its own hierarchy. **Exit 1 from a traceback is
+indistinguishable from a crash for any other reason**, which defeats the point of a distinct code
+for "the database is down". Fixed by catching broadly on purpose and reporting narrowly;
+`_select_repository` extracted so the logic is testable on its own.
+
+**And a test-performance defect I introduced:** the first version of those tests took **391
+seconds** for ten assertions, because a FILTERED port times out rather than refusing. Two attempts
+at a "fast failing" port hit the same wall; the answer was not a better dead port but a
+`connect_timeout=2`. **391s -> 6.5s.** Worth recording because the suite is what would have
+degraded quietly -- 6.5 minutes added to a 20-second fast lane is how a suite gets skipped, and a
+skipped suite is worse than a slow one.
+
+It still cannot trade, re-asserted AFTER the wiring: a database connection is the most plausible
+route by which an order path could creep into a reading loop, so the absence is asserted again.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

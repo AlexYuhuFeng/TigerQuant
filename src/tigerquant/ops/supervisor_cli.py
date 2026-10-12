@@ -19,6 +19,7 @@ limitation `tigerquant alerts drift` carries, for the same reason.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -31,11 +32,15 @@ from tigerquant.ops.supervisor import Supervisor, SupervisorConfig, SupervisorRe
 if TYPE_CHECKING:
     import argparse
 
-__all__ = ["DEFAULT_HEARTBEAT", "build_cycle", "cmd_supervise"]
+__all__ = ["DEFAULT_HEARTBEAT", "DSN_ENV", "build_cycle", "cmd_supervise"]
 
 #: Where the liveness record goes by default. A path rather than a flag-with-no-default, because
 #: a supervisor nobody can tell is stuck is the problem this command exists to avoid.
 DEFAULT_HEARTBEAT = Path("out/supervisor.json")
+
+#: Set this to reconcile against PostgreSQL without passing --dsn. Unset means in-memory,
+#: which the command reports as a wiring check rather than quietly treating as real.
+DSN_ENV = "TIGERQUANT_DB_DSN"
 
 
 def build_cycle(
@@ -76,6 +81,10 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         print(f"error: journal not found: {args.journal}", file=sys.stderr)
         return 2
 
+    connection, repository, failure = _select_repository(args)
+    if failure:
+        return failure
+
     router: AlertRouter | None = None
     if not args.no_alerts:
         router = build_router(
@@ -84,7 +93,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             floor=_severity(args.floor),
         )
 
-    cycle, monitor = build_cycle(args.journal, mode=Mode(args.mode))
+    cycle, monitor = build_cycle(args.journal, mode=Mode(args.mode), repository=repository)
 
     config = SupervisorConfig(
         interval_seconds=args.interval,
@@ -99,17 +108,25 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     print(f"  max failures      {args.max_failures} consecutive, then halt")
     print(f"  heartbeat         {args.heartbeat}")
     print(f"  cycles            {'until stopped' if args.iterations is None else args.iterations}")
-    print(f"  database          {_describe_database()}")
+    print(f"  database          {_describe_database(repository)}")
     print()
     if not args.quiet:
-        print(
-            "  NOTE: this reconciles against an IN-MEMORY database, so it is a wiring check\n"
-            "        rather than a live reconciliation. Pointing it at PostgreSQL is not\n"
-            "        implemented. Stop with Ctrl-C; the last heartbeat stays on disk.\n"
-        )
+        if repository is None:
+            print(
+                "  NOTE: no database given, so this reconciles against an IN-MEMORY repository.\n"
+                f"        That is a WIRING CHECK, not a live reconciliation. Pass --dsn or set\n"
+                f"        {DSN_ENV} to reconcile against PostgreSQL.\n"
+                "        Stop with Ctrl-C; the last heartbeat stays on disk.\n"
+            )
+        else:
+            print(
+                "  Reconciling against PostgreSQL. Nothing here repairs a divergence: we do not\n"
+                "  know which record is wrong, so overwriting either would destroy the evidence\n"
+                "  needed to find out. Stop with Ctrl-C; the last heartbeat stays on disk.\n"
+            )
 
     try:
-        report = supervisor.run()
+        report = _run_supervisor(supervisor)
     except KeyboardInterrupt:
         # Ctrl-C is the normal way to stop a long-running process, so it is not an error. The
         # report is built from whatever cycles completed.
@@ -134,13 +151,66 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         )
     print(f"  monitor history: {len(monitor.history)} check(s)")
 
+    if connection is not None:
+        # The driver's connection type is not imported here on purpose -- the db extra is
+        # optional -- so close() is called through a narrow protocol rather than an isinstance.
+        close = getattr(connection, "close", None)
+        if callable(close):
+            close()
+
     # Exit 2 on a halt, so a supervisor can be supervised by whatever started it. Exiting 0 would
     # make a self-halted loop indistinguishable from a clean shutdown.
     return 2 if report.halted else 0
 
 
-def _describe_database() -> str:
-    return "in-memory (wiring check only; PostgreSQL is not wired to this command)"
+def _select_repository(
+    args: argparse.Namespace,
+) -> tuple[object | None, object | None, int | None]:
+    """(connection, repository, failure_code).
+
+    Extracted so `cmd_supervise` reads as a sequence of decisions rather than as a sequence of
+    except clauses, and so the refusal logic is testable on its own.
+
+    A connection failure is a REFUSAL, never a fallback to in-memory: a supervisor that appears to
+    reconcile while actually comparing against an empty dict is worse than one that will not start,
+    because it reports health it has not checked.
+    """
+    dsn = getattr(args, "dsn", None) or os.environ.get(DSN_ENV)
+    if not dsn:
+        return None, None, None
+
+    from tigerquant.core.errors import IntegrationUnavailable, TigerQuantError
+    from tigerquant.db.postgres import PostgresRepository, connect
+
+    try:
+        connection = connect(dsn)
+    except (IntegrationUnavailable, TigerQuantError) as exc:
+        print(f"cannot reach the database: {exc}", file=sys.stderr)
+        return None, None, 2
+    except Exception as exc:  # noqa: BLE001 - the driver's exception types are many
+        # The driver raises its OWN hierarchy, which the clause above does not catch. Without
+        # this, an unreachable database produced a TRACEBACK and exit 1 -- and exit 1 from a
+        # traceback is indistinguishable from a crash for any other reason, which defeats the
+        # point of a distinct code for "the database is down". Caught broadly ON PURPOSE,
+        # reported narrowly.
+        print(
+            f"cannot reach the database: {type(exc).__name__}: {str(exc)[:200]}",
+            file=sys.stderr,
+        )
+        return None, None, 2
+    return connection, PostgresRepository(connection, mode=Mode(args.mode)), None
+
+
+def _run_supervisor(supervisor: Supervisor) -> SupervisorReport:
+    """Run it. Extracted so the Ctrl-C handler reads as a handler rather than a nested block."""
+    return supervisor.run()
+
+
+def _describe_database(repository: object | None) -> str:
+    """Name the repository, because "which database" is the first thing an operator asks."""
+    if repository is None:
+        return "in-memory (WIRING CHECK ONLY -- pass --dsn for a real reconciliation)"
+    return f"PostgreSQL via {type(repository).__name__}"
 
 
 def supervise_parser(sub: object) -> None:
@@ -181,6 +251,14 @@ def supervise_parser(sub: object) -> None:
         type=Path,
         default=DEFAULT_HEARTBEAT,
         help="liveness file, rewritten twice per cycle so a watchdog can see the cycle index",
+    )
+    supervise.add_argument(
+        "--dsn",
+        default=None,
+        help=(
+            "PostgreSQL DSN. Omit to reconcile against an in-memory repository, which is a "
+            f"WIRING CHECK and not a live reconciliation. {DSN_ENV} is the environment equivalent."
+        ),
     )
     supervise.add_argument("--no-alerts", action="store_true", help="run without routing alerts")
     supervise.add_argument("--alert-log", type=Path, default=None, help="file sink for alerts")

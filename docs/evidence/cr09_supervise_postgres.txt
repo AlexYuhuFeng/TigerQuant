@@ -1,0 +1,121 @@
+TigerQuant CR-09 evidence (part 13) - the supervisor reconciles against PostgreSQL
+Generated: see the git commit this file was added in
+
+Closes the gap the `supervise` command's own banner admitted: "this reconciles against an
+IN-MEMORY database, so it is a wiring check rather than a live reconciliation. Pointing it at
+PostgreSQL is not implemented."
+
+It is now implemented, and verified against the running container.
+
+===========================================================================
+1. Live run against the real database
+===========================================================================
+$ python -m tigerquant supervise out/pg/j.jsonl --dsn "postgresql://tq_backtest:...@127.0.0.1:5432/tq_backtest"
+
+    database          PostgreSQL via PostgresRepository
+    supervisor: 1 cycle(s), 1 ok, 0 failed; worst severity WARNING; stopped normally
+      digest sha256:747992cfc8b501eb6870a64fe5caa800401a6dedc92817702972c268698caee9
+
+Exit 0, one real reconciliation per cycle against `tq_backtest`, the mode-appropriate role.
+
+Dialect: `--dsn`, or `TIGERQUANT_DB_DSN` in the environment. The SAME variable `tigerquant drift`
+already uses, so one setting covers both commands rather than two names for one thing.
+
+===========================================================================
+2. A connection failure is a REFUSAL, never a fallback
+===========================================================================
+If the database cannot be reached the command EXITS 2 and reconciles nothing. It does not fall back
+to in-memory.
+
+That is the whole argument: a supervisor that appears to reconcile while actually comparing the
+journal against an empty dict is WORSE than one that will not start, because it reports health it
+has not checked. A wiring check that presents itself as a live reconciliation is precisely the
+failure AGENTS.md invariant 11 forbids.
+
+The banner also says which it is, in the repository's own words:
+
+    database          in-memory (WIRING CHECK ONLY -- pass --dsn for a real reconciliation)
+    database          PostgreSQL via PostgresRepository
+
+===========================================================================
+3. THE DEFECT FOUND BY HAND: a traceback instead of a refusal
+===========================================================================
+Pointing the command at an unreachable database produced a raw driver exception and **exit 1**,
+not the clean "cannot reach the database" message and exit 2 the command intends. The `except`
+clause caught only this project's own error types, and the driver raises its own hierarchy.
+
+Why it matters beyond tidiness: a supervisor is started by an orchestrator, and **exit 1 from a
+traceback is indistinguishable from a crash for any other reason**. The entire point of having a
+distinct code for "the database is down" is that it can be handled differently -- restart the
+database rather than page someone about the code.
+
+Fixed by catching broadly ON PURPOSE and reporting narrowly:
+
+    cannot reach the database: ConnectionTimeout: connection timeout expired
+
+`_select_repository` was extracted so this logic is testable on its own and `cmd_supervise` reads
+as decisions rather than as except clauses.
+
+===========================================================================
+4. A test-performance defect I introduced and then fixed
+===========================================================================
+The first version of the PostgreSQL tests took **391 seconds** for ten assertions -- 130s each for
+three of them -- because a FILTERED port times out rather than refusing, and the driver waits out
+its default patience.
+
+Two attempts at a "fast failing" DSN (ports 5999 and 1) both hit the same wall. The fix is not a
+better dead port but a `connect_timeout`:
+
+    postgresql://nope:nope@127.0.0.1:1/none?connect_timeout=2
+
+**391s -> 6.5s.** A 60x improvement, and the parameter is worth having in the product as well: an
+operator starting a supervisor against an unreachable database should get a refusal in seconds,
+not after the driver's default patience.
+
+Worth recording because the test SUITE is the thing that would have degraded quietly. 6.5 minutes
+added to a 20-second fast lane is the kind of regression that gets a suite skipped, and a skipped
+suite is worse than a slow one.
+
+===========================================================================
+5. It still cannot trade, re-asserted after the wiring
+===========================================================================
+A database connection is the most plausible route by which an order path could creep into a
+reading loop, so the absence is asserted AGAIN after adding it: the module still contains no
+`submit_order`, `place_order`, `OrderIntent` or `cancel_order`, and imports no broker adapter.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+919 passed
+
+$ python -m pytest tests/unit/test_supervise_postgres.py -q
+10 passed in 6.5s
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 99 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. The mode-to-role mapping is not validated by this command: passing a PAPER DSN while running
+   `--mode BACKTEST` would reconcile the wrong database and be reported as consistent. The mode
+   should be checked against the database's own identity, and that is NOT done.
+2. No reconnection. If the database drops mid-run, the next cycle raises, and after
+   `max_consecutive_failures` the supervisor halts. That is the designed behaviour, but a transient
+   network blip therefore stops the loop; there is no backoff-and-retry tier between "fine" and
+   "halted".
+3. The connection is opened once and held for the process's lifetime. No pooling, no per-cycle
+   reconnect, no idle-timeout handling.
+4. No DSN redaction check. A DSN containing a password is passed to the driver, and nothing asserts
+   it cannot reach a log or an alert -- `--dsn` on a command line is visible in the process list.
+5. Verified against the local development container only. No production database, no TLS, no
+   connection string rotation.
+6. The `db` extra must be installed. Without it the command refuses cleanly, but nothing states
+   that the extra is required until the import fails.
