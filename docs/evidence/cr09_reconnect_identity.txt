@@ -1,0 +1,97 @@
+TigerQuant CR-09 evidence (part 18) - identity is re-verified on every connection
+Generated: see the git commit this file was added in
+
+Closes the limitation part 17 recorded: "Nothing re-checks the identity on RECONNECT. The guard
+runs once, before the loop or the projection; a reconnect that landed on a different database would
+not be caught."
+
+===========================================================================
+1. Why this mattered
+===========================================================================
+The guard added two rounds ago runs once, when the process starts. **A reconnect is exactly the
+moment the guarantee it established can silently stop holding** -- a failover to a replica, a DNS
+change, a load balancer moving the connection to another node. Any of them can land the process on
+a DIFFERENT database, and the run would carry on reporting against it as if nothing had happened.
+
+That is the SAME FALSE-NEGATIVE SHAPE as the original defect, one layer down. Not "we connected to
+the wrong database" but **"we connected to the right one, and then quietly moved."**
+
+===========================================================================
+2. Verified on every connection, not only the first
+===========================================================================
+`ReconnectingRepository` gains an optional `verify_on_connect`, called with EVERY new connection
+including reconnections. Raising from it:
+
+  * **closes the rejected connection** rather than keeping a working repository pointed at the
+    wrong database;
+  * **propagates unchanged**, so the caller sees a refused reconnect rather than a surprise;
+  * **is treated as PERMANENT** by the supervisor's classifier, which is right -- landing on the
+    wrong database is not something to retry;
+  * and **does not inflate `reconnects`**, because that number must mean successful reconnections
+    or it lies about how healthy the loop was.
+
+It is OPTIONAL, so nothing that did not ask for it changed behaviour.
+
+===========================================================================
+3. Proof of the scenario
+===========================================================================
+Scripted so the first connection lands on BACKTEST and the reconnection lands on PAPER:
+
+    startup verify: ['BACKTEST'] -> rows
+    RESULT: refused -> refusing: database is PAPER, expected BACKTEST
+    verifications performed: ['BACKTEST', 'PAPER']
+    connected after refusal: False
+
+The verification list is the evidence that matters: it shows the check ran on the SECOND
+connection. `connected: False` shows nothing was kept.
+
+===========================================================================
+4. One rule, not two
+===========================================================================
+The FIRST connection goes through the same path as a reconnection, so there is one rule rather than
+two that could disagree. A test asserts a wrong FIRST connection is refused at startup by the same
+mechanism.
+
+And a refusal does not poison the proxy: once the database comes back correct, the next call works.
+A guard that permanently disabled the loop after one bad reconnect would turn a transient failover
+into an outage.
+
+Verification runs once per CONNECTION, not once per call -- checking on every query would be a
+round trip per query for a guarantee that cannot change while the connection is up.
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q
+1008 passed
+
+$ python -m pytest tests/unit/test_reconnect_identity.py -q
+12 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 101 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **The reconnect scenario is proven with a SCRIPTED connection sequence, not a real failover.**
+   Nothing here stops a container, changes DNS, or moves a load balancer. The LOGIC is tested; the
+   integration is not -- the same boundary as the reconnect evidence two rounds ago.
+2. Verification costs one extra round trip per connection. Negligible at a 30-second cadence and
+   once per connection, but it is not free.
+3. If verification FAILS on a reconnect, the proxy raises every time it is asked, so the supervisor
+   sees a permanent fault and halts. That is the intended behaviour, but it means a failover to a
+   replica of the CORRECT database -- which would still pass -- and a failover to a copy with no
+   identity row -- which would NOT -- are treated very differently. An undeclared copy of the right
+   database halts the loop.
+4. `verify_on_connect` is only wired into `supervise`. `drift` and `project` do not reconnect at
+   all, so they have nothing to re-verify -- but that also means they have no recovery path if the
+   connection drops mid-run.
+5. The declaration still cannot be cleared through any command, so a database declared in error
+   can only be corrected outside this tool.

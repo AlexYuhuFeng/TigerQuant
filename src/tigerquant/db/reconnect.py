@@ -1,5 +1,8 @@
 """A repository proxy that re-establishes its connection after a connection-shaped failure.
 
+Verification runs on EVERY connection, not only the first. A guard that runs once expires at the
+first reconnect, and a reconnect is precisely when the guarantee can silently stop holding.
+
 Why this exists. The supervisor's backoff tier retries a transient failure, but it retried the
 CYCLE while the repository kept its original connection. Against a database that had actually
 restarted -- which is the case backoff is FOR -- every retry failed again for a reason backoff
@@ -48,6 +51,7 @@ class ReconnectingRepository:
         "_reconnects",
         "_repository",
         "_repository_for",
+        "_verify_on_connect",
     )
 
     def __init__(
@@ -56,10 +60,19 @@ class ReconnectingRepository:
         repository_for: Callable[[Any], Any],
         *,
         is_dead: Callable[[BaseException], bool],
+        verify_on_connect: Callable[[Any], None] | None = None,
     ) -> None:
         self._connect = connect
         self._repository_for = repository_for
         self._is_dead = is_dead
+        #: Called with EVERY new connection, including reconnections.
+        #:
+        #: A guard that runs only at startup expires at the first reconnect, and a reconnect is
+        #: exactly when the guarantee can silently stop holding -- a failover, a DNS change, a load
+        #: balancer moving the connection elsewhere. Raising from here is treated as PERMANENT by
+        #: the supervisor's classifier, which is right: a reconnect that landed on the wrong
+        #: database is not something to retry.
+        self._verify_on_connect = verify_on_connect
         self._connection: Any = None
         self._repository: Any = None
         #: How many times a connection has been re-established. Exposed because "it recovered"
@@ -79,12 +92,28 @@ class ReconnectingRepository:
     def _ensure(self) -> Any:
         """The live repository, connecting or RE-connecting if there is none."""
         if self._repository is None:
-            if self._connection is not None or self._ever_connected:
+            reconnecting = self._connection is not None or self._ever_connected
+            if reconnecting:
                 # A connection was held and has been dropped, so this is a RE-connection.
                 self._reconnects += 1
             self._ever_connected = True
-            self._connection = self._connect()
-            self._repository = self._repository_for(self._connection)
+            connection = self._connect()
+            if self._verify_on_connect is not None:
+                try:
+                    self._verify_on_connect(connection)
+                except Exception:
+                    # Do NOT keep a connection that failed verification. It is closed and the
+                    # error propagates, so the caller sees a refused reconnect rather than a
+                    # working repository pointed at the wrong database.
+                    close = getattr(connection, "close", None)
+                    if callable(close):
+                        with suppress(Exception):
+                            close()
+                    if reconnecting:
+                        self._reconnects -= 1
+                    raise
+            self._connection = connection
+            self._repository = self._repository_for(connection)
         return self._repository
 
     def disconnect(self) -> None:

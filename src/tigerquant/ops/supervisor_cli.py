@@ -262,6 +262,16 @@ def _select_repository(
         lambda: connect(dsn),
         lambda live: PostgresRepository(live, mode=Mode(args.mode)),
         is_dead=is_transient_failure,
+        # Re-verify on EVERY connection, not only the first. A guard that runs once expires at the
+        # first reconnect, and a reconnect is exactly when the guarantee can silently stop holding
+        # -- a failover, a DNS change, a load balancer moving the connection elsewhere. Raising
+        # here is treated as PERMANENT, which is right: landing on the wrong database is not
+        # something to retry.
+        verify_on_connect=lambda live: verify_identity(
+            live,
+            Mode(args.mode),
+            allow_undeclared=getattr(args, "allow_undeclared_database", False),
+        ).raise_if_refused(),
     )
     # Prime it, so a bad DSN is reported at STARTUP rather than on the first cycle. A supervisor
     # that appears to start and then immediately halts is worse than one that refuses to start.

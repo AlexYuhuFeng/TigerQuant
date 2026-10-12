@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: identity re-check on reconnect; CR-03 awaits the owner's consent
+Current CR: in-process hang detection; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -1067,6 +1067,42 @@ database produced an uncaught `ConfigurationError` instead of a clean refusal. *
 correct; its delivery was not** -- a traceback is indistinguishable from a crash, and an operator
 who passes the wrong DSN *and* a helpful extra flag deserves the same message as one who does not.
 **A refusal is a decision, not an exception to leak.**
+
+### 2026-10-12 - CR-09 part 18: identity is re-verified on every connection
+
+Full evidence: `docs/evidence/cr09_reconnect_identity.txt`. 12 new tests.
+
+**A reconnect is exactly the moment the identity guarantee can silently stop holding** -- a
+failover to a replica, a DNS change, a load balancer moving the connection elsewhere. Any of them
+can land the process on a DIFFERENT database and the run would carry on reporting against it.
+
+**The same false-negative shape as the original defect, one layer down.** Not "we connected to the
+wrong database" but **"we connected to the right one, and then quietly moved."**
+
+`ReconnectingRepository` gains an optional `verify_on_connect`, called with EVERY connection. A
+failure to verify **closes the rejected connection** rather than keeping a working repository
+pointed at the wrong database, **propagates unchanged** so the caller sees a refused reconnect, and
+is treated as **PERMANENT** by the supervisor's classifier -- right, because landing on the wrong
+database is not something to retry. It does **not inflate `reconnects`**, since that number must
+mean *successful* reconnections or it lies about how healthy the loop was.
+
+Proof, with a scripted sequence where the reconnect lands elsewhere:
+
+```
+startup verify: ['BACKTEST'] -> rows
+RESULT: refused -> refusing: database is PAPER, expected BACKTEST
+verifications performed: ['BACKTEST', 'PAPER']       <- it DID re-verify
+connected after refusal: False                        <- nothing was kept
+```
+
+**One rule, not two.** The first connection goes through the same path as a reconnection, so they
+cannot disagree. And a refusal does not poison the proxy: once the database comes back correct the
+next call works, because a guard that permanently disabled the loop after one bad reconnect would
+turn a transient failover into an outage. Verification runs once per CONNECTION, not per call.
+
+**Honest boundary:** the scenario is proven with a SCRIPTED connection sequence, not a real
+failover. Nothing here stops a container, changes DNS, or moves a load balancer. The logic is
+tested; the integration is not.
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
