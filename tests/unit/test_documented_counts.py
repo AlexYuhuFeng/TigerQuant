@@ -19,12 +19,15 @@ import pytest
 from tigerquant.ops.gates import (
     _DOCUMENTED_COMMANDS,
     COLLECTED_COUNTS,
+    AuditRecord,
     DocumentedCount,
     GateReport,
     _collect_count,
     check_documented_counts,
     verify_gates,
 )
+
+RAN_AUDIT = AuditRecord(recorded_at="2026-10-12T00:00:00+00:00")
 
 
 class TestTheCountsMatch:
@@ -77,18 +80,24 @@ class TestAStaleCountIsCaught:
 
     def test_a_stale_count_fails_the_whole_report(self) -> None:
         """Otherwise it is a warning nobody reads, which is how the original went unnoticed."""
-        report = GateReport(counts=(DocumentedCount(label="x", marker="", claimed=1, actual=2),))
+        report = GateReport(
+            audit=RAN_AUDIT, counts=(DocumentedCount(label="x", marker="", claimed=1, actual=2),)
+        )
         assert not report.ok
 
     def test_the_summary_names_the_problem(self) -> None:
-        report = GateReport(counts=(DocumentedCount(label="x", marker="", claimed=1, actual=2),))
+        report = GateReport(
+            audit=RAN_AUDIT, counts=(DocumentedCount(label="x", marker="", claimed=1, actual=2),)
+        )
         assert "STALE DOCUMENTED COUNTS" in report.summary()
 
     def test_the_render_lists_each_count(self) -> None:
         assert "documented count [OK]" in verify_gates().render()
 
     def test_a_matching_count_does_not_fail(self) -> None:
-        report = GateReport(counts=(DocumentedCount(label="x", marker="", claimed=2, actual=2),))
+        report = GateReport(
+            audit=RAN_AUDIT, counts=(DocumentedCount(label="x", marker="", claimed=2, actual=2),)
+        )
         assert report.ok
 
 

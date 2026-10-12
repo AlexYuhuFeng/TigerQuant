@@ -40,8 +40,8 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **1139 passed** |
-| `pytest -q -m "not requires_db"` | **1119 passed**, 20 deselected |
+| `pytest -q` (PostgreSQL running) | **1160 passed** |
+| `pytest -q -m "not requires_db"` | **1140 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
 
 **The counts above are VERIFIED by `tigerquant gates`** against a record written by the last full test run. See `docs/evidence/documented_counts_verified.txt`.
@@ -70,7 +70,7 @@ Last updated: 2026-10-10.
    `nautilus_trader==1.231.0` pins `fsspec==2026.2.0` EXACTLY and is the latest release, so there is
    no constraint and no upgrade that fixes it. `fsspec.open` is reached only from nautilus entry
    points this project does not invoke, but **the CVE's nature has NOT been assessed**, so this is a
-   located risk and not a cleared one. See `docs/evidence/dependency_audit.txt`.
+   located risk and not a cleared one. **ASSESSED: it is RCE via `ReferenceFileSystem`, and it is UNREACHABLE here** -- zero references to that class, `reference://` or kerchunk in TigerQuant or in the installed engine. It is now a stated ACCEPTED RISK with a review condition, reported by `tigerquant gates` on every run, and **an audit that has never run FAILS the gate** rather than passing as clean. See `docs/evidence/cve_reachability_and_gate.txt`.
 4. **Docker Hub is unreachable** from this network. `deploy/compose.yaml` pulls the same official
    Postgres image through `public.ecr.aws`; the digest is recorded in
    `docs/evidence/cr05_database.txt`.

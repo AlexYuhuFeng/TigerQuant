@@ -31,14 +31,19 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 __all__ = [
+    "AUDIT_RECORD",
     "COLLECTED_COUNTS",
     "CRITICAL_CASES",
+    "AuditFinding",
+    "AuditRecord",
     "CaseStatus",
     "CriticalCase",
     "DocumentedCount",
     "GateReport",
     "check_documented_counts",
     "collect_node_ids",
+    "read_audit_record",
+    "record_audit",
     "verify_gates",
 ]
 
@@ -222,11 +227,225 @@ def check_documented_counts(*, root: Path | None = None) -> tuple[DocumentedCoun
 
 
 @dataclass(frozen=True, slots=True)
+class AuditFinding:
+    """One vulnerability a recorded dependency audit reported."""
+
+    package: str
+    version: str
+    advisory: str
+    fix: str = ""
+
+    @property
+    def upstream_fix_exists(self) -> bool:
+        """Whether the advisory publishes a fixed version.
+
+        This is what `pip-audit` knows, and it is NOT the same as a fix we can adopt: a transitive
+        pin can make an available fix unadoptable, which is exactly the case here.
+        """
+        return bool(self.fix)
+
+    @property
+    def accepted_reason(self) -> str:
+        """Why this finding is accepted, or "" when it is not."""
+        return ACCEPTED_RISKS.get((self.package, self.advisory), "")
+
+    @property
+    def needs_action(self) -> bool:
+        """Whether somebody can DO something about it.
+
+        An upstream fix that cannot be adopted is not actionable HERE, and failing the gate on it
+        would make the gate unsatisfiable -- which is how gates get disabled. An ACCEPTED entry says
+        so out loud, with a reason, rather than leaving the reader to infer it from a red result.
+        """
+        return self.upstream_fix_exists and not self.accepted_reason
+
+    def describe(self) -> str:
+        if self.accepted_reason:
+            verdict = f"ACCEPTED: {self.accepted_reason}"
+        elif self.upstream_fix_exists:
+            verdict = f"fix: {self.fix}"
+        else:
+            verdict = "no upstream fix"
+        return f"{self.package} {self.version} {self.advisory} ({verdict})"
+
+
+@dataclass(frozen=True, slots=True)
+class AuditRecord:
+    """What the last dependency audit found.
+
+    ``findings`` being empty is a PASS only when the audit actually ran. ``recorded_at`` empty means
+    it never has, and that is reported as a failure rather than as "no vulnerabilities" -- the two
+    are different claims and conflating them is how this project carried a gate item for rounds
+    while believing it was blocked.
+    """
+
+    recorded_at: str = ""
+    findings: tuple[AuditFinding, ...] = ()
+    detail: str = ""
+
+    @property
+    def ran(self) -> bool:
+        return bool(self.recorded_at)
+
+    @property
+    def actionable_findings(self) -> tuple[AuditFinding, ...]:
+        """Findings somebody can act on. A non-empty tuple here is a defect, not a risk."""
+        return tuple(finding for finding in self.findings if finding.needs_action)
+
+    @property
+    def accepted_findings(self) -> tuple[AuditFinding, ...]:
+        """Findings understood and accepted, each with a stated reason."""
+        return tuple(finding for finding in self.findings if finding.accepted_reason)
+
+    def describe(self) -> str:
+        if not self.ran:
+            return (
+                "dependency audit [NEVER RUN] -- an audit that has never run is not a passing "
+                "audit; run `tigerquant gates --record-audit`"
+            )
+        if not self.findings:
+            return f"dependency audit [CLEAN] recorded {self.recorded_at}"
+        accepted = len(self.accepted_findings)
+        suffix = f", {accepted} accepted" if accepted else ""
+        return (
+            f"dependency audit [{len(self.findings)} finding(s){suffix}] "
+            f"recorded {self.recorded_at}: "
+            + "; ".join(finding.describe() for finding in self.findings)
+        )
+
+
+#: Where the last dependency audit is recorded.
+AUDIT_RECORD = Path("out/dependency_audit.json")
+
+#: Vulnerabilities KNOWN, UNDERSTOOD, and ACCEPTED, keyed (package, advisory).
+#:
+#: An entry here is a decision, not a suppression. Each must state why the finding cannot be acted
+#: on and what would change that, so the next round that COULD fix it knows to look. Anything not
+#: listed fails the gate -- silence is never the mechanism.
+#:
+#: This is deliberately a literal table rather than a config file: accepting a known vulnerability
+#: should require editing reviewed code, not changing a setting.
+ACCEPTED_RISKS: dict[tuple[str, str], str] = {
+    (
+        "fsspec",
+        "CVE-2026-104851",
+    ): (
+        "nautilus_trader==1.231.0 pins fsspec==2026.2.0 EXACTLY, 1.231.0 is the latest release, and "
+        "`uv lock` refuses the floor as unsatisfiable -- established by trying it, see "
+        "docs/evidence/dependency_audit.txt. The vulnerable path is "
+        "ReferenceFileSystem, reached only by opening a `reference://` Kerchunk document; NOTHING in "
+        "TigerQuant or in the installed engine references it (zero usages), and the project does not "
+        "invoke nautilus's backtest or live entry points. REVIEW WHEN: a nautilus release relaxes the "
+        "pin, or any code here gains a `reference://` path."
+    ),
+}
+
+
+def read_audit_record(*, root: Path | None = None) -> AuditRecord:
+    """The recorded audit, or an unrun record. Never raises: a gate command must not crash because
+    a file moved, and an absent file means "not run", which is itself reportable."""
+    base = root or REPO_ROOT
+    try:
+        loaded: object = json.loads((base / AUDIT_RECORD).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return AuditRecord()
+    if not isinstance(loaded, dict):
+        return AuditRecord()
+    raw = loaded.get("findings")
+    findings = tuple(
+        AuditFinding(
+            package=str(item.get("package", "")),
+            version=str(item.get("version", "")),
+            advisory=str(item.get("advisory", "")),
+            fix=str(item.get("fix", "")),
+        )
+        for item in (raw if isinstance(raw, list) else [])
+        if isinstance(item, dict)
+    )
+    return AuditRecord(
+        recorded_at=str(loaded.get("recorded_at", "")),
+        findings=findings,
+        detail=str(loaded.get("detail", "")),
+    )
+
+
+def record_audit(*, root: Path | None = None, timeout: int = 600) -> AuditRecord:
+    """Run `pip-audit` and write what it found. Returns the record.
+
+    Run from the EDGE of the system rather than on every `gates` invocation: the audit needs the
+    network and takes tens of seconds, while `gates` is expected to answer immediately. Recording it
+    means every later run REPORTS it, so a finding cannot be forgotten -- which is precisely how the
+    previous "pip-audit cannot run" note survived several rounds after it stopped being true.
+    """
+    import datetime as dt
+    import subprocess
+
+    base = root or REPO_ROOT
+    result = subprocess.run(
+        [sys.executable, "-m", "pip_audit", "--progress-spinner", "off", "--format", "json"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        cwd=base,
+        timeout=timeout,
+    )
+    findings: list[AuditFinding] = []
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    for dependency in payload.get("dependencies", []) if isinstance(payload, dict) else []:
+        for vuln in dependency.get("vulns", []) or []:
+            fixes = vuln.get("fix_versions") or []
+            findings.append(
+                AuditFinding(
+                    package=str(dependency.get("name", "")),
+                    version=str(dependency.get("version", "")),
+                    advisory=str(vuln.get("id", "")),
+                    fix=", ".join(str(item) for item in fixes),
+                )
+            )
+
+    record = AuditRecord(
+        recorded_at=dt.datetime.now(tz=dt.UTC).isoformat(),
+        findings=tuple(findings),
+        detail=(
+            "clean" if not findings else f"{len(findings)} finding(s); exit {result.returncode}"
+        ),
+    )
+    (base / AUDIT_RECORD).parent.mkdir(parents=True, exist_ok=True)
+    (base / AUDIT_RECORD).write_text(
+        json.dumps(
+            {
+                "recorded_at": record.recorded_at,
+                "detail": record.detail,
+                "findings": [
+                    {
+                        "package": item.package,
+                        "version": item.version,
+                        "advisory": item.advisory,
+                        "fix": item.fix,
+                    }
+                    for item in record.findings
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return record
+
+
+@dataclass(frozen=True, slots=True)
 class GateReport:
     results: tuple[CaseResult, ...] = ()
     note: str = ""
     #: Test counts the status documents assert, checked against the last real run.
     counts: tuple[DocumentedCount, ...] = ()
+    #: The last dependency audit. An unrun audit fails the report.
+    audit: AuditRecord = AuditRecord()
 
     @property
     def proven(self) -> tuple[CaseResult, ...]:
@@ -250,7 +469,12 @@ class GateReport:
         """
         # A stale documented count FAILS the report. It is a claim about this repository, and a
         # claim nothing checks is a claim that rots -- which is exactly what happened.
-        return not self.unproven and all(count.matches for count in self.counts)
+        # An audit that has NEVER RUN fails, and so does one with a FIXABLE finding: the first
+        # is an unchecked risk and the second is one nobody has dealt with. A finding with no
+        # available fix does not fail -- it cannot be acted on, and a gate that fails on the
+        # unactionable gets disabled.
+        audit_ok = self.audit.ran and not self.audit.actionable_findings
+        return not self.unproven and all(count.matches for count in self.counts) and audit_ok
 
     def summary(self) -> str:
         total = len(self.results)
@@ -263,6 +487,10 @@ class GateReport:
         stale = [count for count in self.counts if not count.matches]
         if stale:
             lines.append(f"STALE DOCUMENTED COUNTS: {len(stale)}")
+        if self.audit.actionable_findings:
+            lines.append(f"ACTIONABLE VULNERABILITIES: {len(self.audit.actionable_findings)}")
+        if not self.audit.ran:
+            lines.append("DEPENDENCY AUDIT NEVER RUN")
         return "; ".join(lines)
 
     def render(self) -> str:
@@ -281,6 +509,8 @@ class GateReport:
         if self.counts:
             lines.append("")
             lines.extend(count.describe() for count in self.counts)
+        lines.append("")
+        lines.append(self.audit.describe())
         return "\n".join(lines)
 
 
@@ -482,12 +712,14 @@ def verify_gates(
     """
     selected = tuple(cases) if cases is not None else CRITICAL_CASES
     counts = check_documented_counts(root=root)
+    audit = read_audit_record(root=root)
     collected = collect_node_ids(root=root)
     if not collected:
         return GateReport(
             results=tuple(CaseResult(case=case, status=case.claimed) for case in selected),
             note="COULD NOT COLLECT TESTS: statuses below are the CLAIMED ones, not verified ones",
             counts=counts,
+            audit=audit,
         )
 
     results = []
@@ -495,4 +727,4 @@ def verify_gates(
         present = tuple(node for node in case.tests if _covers(node, collected))
         missing = tuple(node for node in case.tests if not _covers(node, collected))
         results.append(CaseResult(case=case, status=case.claimed, present=present, missing=missing))
-    return GateReport(results=tuple(results), counts=counts)
+    return GateReport(results=tuple(results), counts=counts, audit=audit)

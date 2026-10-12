@@ -30,7 +30,7 @@ from tigerquant.market.fixtures import load_scenario
 from tigerquant.ops.alert_cli import cmd_alerts
 from tigerquant.ops.dashboard import DashboardServer, build_app
 from tigerquant.ops.drift_monitor import DriftMonitor
-from tigerquant.ops.gates import verify_gates
+from tigerquant.ops.gates import record_audit, verify_gates
 from tigerquant.ops.lineage_report import build_lineage, export
 from tigerquant.ops.metrics_report import attribution_by_decision, measure_session
 from tigerquant.ops.settings import (
@@ -321,6 +321,15 @@ def build_parser() -> argparse.ArgumentParser:
     gates.add_argument(
         "--json", action="store_true", help="emit JSON instead of the rendered report"
     )
+    gates.add_argument(
+        "--record-audit",
+        action="store_true",
+        help=(
+            "run pip-audit first and record what it found. Needs the network and takes tens of "
+            "seconds, so it is not part of a normal run -- but an audit that has NEVER RUN "
+            "fails the report rather than passing as clean."
+        ),
+    )
     supervise_parser(sub)
     return parser
 
@@ -419,6 +428,10 @@ def _cmd_gates(args: argparse.Namespace) -> int:
     named gap is an honest state, and a gate that fails on every honest gap is a gate that gets
     disabled. What must never pass silently is a case with no evidence at all.
     """
+    if getattr(args, "record_audit", False):
+        recorded = record_audit()
+        print(f"audit recorded: {recorded.describe()}")
+
     report = verify_gates()
     if args.json:
         import json
@@ -822,6 +835,10 @@ _OPERATIONAL_CLOCK_MODULES = frozenset(
         # would not be an interval. Nothing here is replayed or journaled.
         "supervisor.py",
         "supervisor_cli.py",
+        # Timestamps WHEN a dependency audit ran. An audit record without a real timestamp
+        # could not be distinguished from one that never ran, which is the state this project
+        # was in for several rounds. Nothing here is replayed.
+        "gates.py",
         # A CLI command a HUMAN runs on demand. "Now" is the correct instant for a synthetic
         # probe and for a reconciliation the operator asked for at this moment; neither is
         # replayed, and neither contributes a journaled event. This module was caught by the

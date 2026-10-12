@@ -16,6 +16,7 @@ import pytest
 
 from tigerquant.ops.gates import (
     CRITICAL_CASES,
+    AuditRecord,
     CaseResult,
     CaseStatus,
     CriticalCase,
@@ -23,6 +24,8 @@ from tigerquant.ops.gates import (
     _covers,
     verify_gates,
 )
+
+RAN_AUDIT = AuditRecord(recorded_at="2026-10-12T00:00:00+00:00")
 
 
 class TestTheMappingIsHonest:
@@ -101,7 +104,7 @@ class TestTheReportCannotContradictItself:
 
     def test_a_report_with_an_unproven_case_is_not_ok(self) -> None:
         result = CaseResult(case=CriticalCase(number=99, summary="x"), status=CaseStatus.UNPROVEN)
-        assert not GateReport(results=(result,)).ok
+        assert not GateReport(audit=RAN_AUDIT, results=(result,)).ok
 
     def test_partial_does_not_fail_the_report(self) -> None:
         """A case with a NAMED gap is honest. A gate that fails on every honest gap gets
@@ -111,7 +114,7 @@ class TestTheReportCannotContradictItself:
             status=CaseStatus.PARTIAL,
             present=("a",),
         )
-        assert GateReport(results=(result,)).ok
+        assert GateReport(audit=RAN_AUDIT, results=(result,)).ok
 
 
 class TestCoverageMatching:

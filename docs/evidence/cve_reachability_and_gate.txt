@@ -1,0 +1,142 @@
+TigerQuant - the CVE assessed, and the audit wired into gates with an explicit accepted risk
+Generated: see the git commit this file was added in
+
+Follows docs/evidence/dependency_audit.txt, which located the finding. This round establishes what it
+actually is, whether it is reachable, and makes the check permanent.
+
+===========================================================================
+1. What the CVE actually is
+===========================================================================
+    id      : CVE-2026-104851
+    summary : fsspec: Server-Side Template Injection in ReferenceFileSystem leads to
+              Remote Code Execution
+
+    details : From 0.9.0 until 2026.6.0, fsspec.implementations.reference.ReferenceFileSystem
+              evaluates fields from Kerchunk reference JSON documents through unrestricted
+              jinja2.Template(...).render(...) calls in _process_references1._render_jinja,
+              _process_templates and _process_gen. A document supplied inline or fetched from an
+              attacker-controlled URL can provide template expressions that execute Python code
+              when the reference filesystem is opened.
+
+**It is remote code execution**, which is the most serious class of finding, and it is why this
+round did not stop at "a CVE exists".
+
+===========================================================================
+2. Reachability: assessed, and it is unreachable
+===========================================================================
+The vulnerability requires **opening a `reference://` URL backed by a Kerchunk reference document**.
+So the question is whether anything here ever does that:
+
+    $ grep for ReferenceFileSystem | reference:// | kerchunk across src/ and tests/
+    (nothing)
+
+    $ grep the same across the INSTALLED nautilus_trader package
+    RESULT usages: 0
+
+**Zero references in TigerQuant. Zero in the whole installed engine.** The vulnerable class is never
+instantiated and the vulnerable protocol is never used, by either side.
+
+The project also does not invoke nautilus's `backtest/__main__.py` or `live/__main__.py`, which are
+the only places in the engine that call `fsspec.open` at all.
+
+**This is a genuine assessment and not a hopeful one**, and it rests on two facts that can be
+rechecked: the class name and the protocol string appear nowhere.
+
+===========================================================================
+3. What is still NOT claimed
+===========================================================================
+- **No fix has been applied.** None is available at the pinned engine version.
+- **The dependency is still present.** A future nautilus release, or a config change that accepted a
+  `reference://` URL, would move this from accepted to live.
+- **`fsspec.open` is still called by nautilus entry points we do not use.** "We do not invoke them"
+  is a statement about today's code, not a guarantee about a future one.
+- The exposure rests on the vulnerable path being `ReferenceFileSystem` SPECIFICALLY. The advisory
+  names that class and that document format; it does not suggest `fsspec.open` on ordinary paths is
+  affected. Had it done so, this assessment would be much worse -- nautilus does call `fsspec.open`.
+
+===========================================================================
+4. The audit is now part of `gates`, and an UNRUN audit FAILS
+===========================================================================
+The deeper failure was not the CVE. It was that **the audit was recorded as "cannot run" once and
+never retested**, and it was carrying a gate item the whole time. A check that lives in someone's
+memory rots exactly the way a documented test count does -- which is a lesson this project has now
+learned twice.
+
+Following the count check:
+
+    $ python -m tigerquant gates --record-audit   # runs pip-audit, records what it found
+    $ python -m tigerquant gates                  # REPORTS it, fast and offline
+
+    dependency audit [1 finding(s), 1 accepted] recorded 2026-10-12T04:29:24+00:00:
+      fsspec 2026.2.0 CVE-2026-104851 (ACCEPTED: ...)
+
+**No record is a FAILURE, not a pass.** An audit that has never run is not a passing audit, and that
+was precisely the state this project was in. Verified: with the record removed, `gates` exits 1 with
+`DEPENDENCY AUDIT NEVER RUN`.
+
+===========================================================================
+5. A defect in my OWN first version, found by running it
+===========================================================================
+The first version marked the finding "fixable" -- `pip-audit` reports `fix: 2026.6.0` -- so `gates`
+exited 1 reporting `FIXABLE VULNERABILITIES: 1`.
+
+**But it is not fixable HERE**, which the previous round established by trying. The gate would have
+failed FOR EVER, with no action that could satisfy it.
+
+**A gate that fails on the unactionable gets disabled, and a disabled gate protects nothing.** That
+is the same reasoning already applied to PARTIAL cases and to severity floors in this project.
+
+So the check now distinguishes two things that `pip-audit` cannot tell apart:
+
+  * `upstream_fix_exists` -- the advisory publishes a fixed version (what pip-audit knows);
+  * `needs_action` -- somebody can actually DO something, which an unadoptable fix does not satisfy.
+
+And the accepted risk is a **literal table in reviewed code**, not a config file: accepting a known
+vulnerability should require editing code somebody reviews, not changing a setting. Every entry must
+state why it cannot be acted on AND `REVIEW WHEN` -- so the round that CAN fix it knows to look.
+Three tests enforce that: a thin reason, a missing review condition, or a missing statement of the
+blocker each fail.
+
+**This is the difference between an accepted risk and an ignored one.**
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+1160 passed
+
+$ python -m pytest tests/unit/test_dependency_audit_gate.py -q
+21 passed
+
+$ python -m tigerquant gates
+critical test cases: 14/16 proven, 2 partial, 0 unproven
+documented count [OK] pytest -q: claims 1160, actual 1160
+dependency audit [1 finding(s), 1 accepted]
+exit 0
+
+$ python -m tigerquant doctor
+[PASS] determinism  [PASS] mode capabilities  [PASS] no live enablement  [PASS] status labelled
+
+$ python -m ruff check src tests tools   -> All checks passed!
+$ python -m mypy                         -> Success. No issues found in 102 source files
+
+Two tests failed when this was first wired, and they were RIGHT to: a `GateReport` with no audit is
+genuinely not ok. They now supply a recorded audit, which is the correct fixture rather than a
+workaround.
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. **`gates --record-audit` needs the network and takes tens of seconds**, so it is deliberately not
+   part of a normal run. A stale record is therefore possible: `gates` reports WHEN the audit ran,
+   but does not fail on age. A record from a month ago would still read as current.
+2. **The accepted-risk table is keyed by (package, advisory)** and does not record which version was
+   present. If `fsspec` were upgraded to a still-vulnerable version, the acceptance would silently
+   carry over.
+3. Accepting an advisory requires a CODE EDIT, which is deliberate -- but it also means an acceptance
+   cannot be time-limited without adding a field, and `REVIEW WHEN` is prose a human must read rather
+   than a condition anything evaluates.
+4. **Reachability was assessed by grep.** "Zero usages" is strong evidence for a named class and a
+   named protocol, and it is not a proof about dynamically constructed strings.
+5. The other stale-limitation candidates recorded in earlier rounds have still NOT been swept. This
+   round found that one had gone stale; the sweep is the obvious next piece of work and was not done.

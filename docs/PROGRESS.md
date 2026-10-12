@@ -1371,6 +1371,44 @@ reachable through a config value is **unknown, and has NOT been assessed.**
 proven zero; and the CVE's nature is not established. What this round did is locate the risk and
 establish that it is unfixable here -- which is a different thing from clearing it.
 
+### 2026-10-12 - The CVE assessed, and the audit wired into `gates` as an explicit accepted risk
+
+Full evidence: `docs/evidence/cve_reachability_and_gate.txt`. 21 tests.
+
+**What it is: remote code execution.** `fsspec` `ReferenceFileSystem` evaluates Kerchunk reference
+documents through **unrestricted `jinja2.Template(...).render(...)`** -- a document from an
+attacker-controlled URL can execute Python when the filesystem is opened. That is the most serious
+class of finding, which is why this round did not stop at "a CVE exists".
+
+**Reachability: assessed, and it is unreachable.** The vulnerability needs a `reference://` URL backed
+by a Kerchunk document. **Zero references to `ReferenceFileSystem`, `reference://` or kerchunk exist
+in TigerQuant -- and zero across the entire installed engine.** The class is never instantiated and
+the protocol is never used, by either side. The project also does not invoke nautilus's
+`backtest/__main__.py` or `live/__main__.py`, the only places that call `fsspec.open` at all.
+
+**The deeper failure was not the CVE.** It was that the audit was recorded as "cannot run" **once and
+never retested**, carrying a gate item the whole time. **A check that lives in someone's memory rots
+exactly the way a documented test count does** -- a lesson this project has now learned twice.
+
+**So the audit is part of `gates`.** `--record-audit` runs `pip-audit` and records it; every later
+run reports it fast and offline. **No record is a FAILURE, not a pass** -- an audit that has never run
+is not a passing audit, and that was precisely the state here. Verified by removing the record:
+`gates` exits 1 with `DEPENDENCY AUDIT NEVER RUN`.
+
+**And my own first version had a defect, found by running it.** It marked the finding "fixable"
+because `pip-audit` reports `fix: 2026.6.0` -- but it is **not fixable here**, established last round
+by trying it. **The gate would have failed for ever with no action that could satisfy it, and a gate
+that fails on the unactionable gets disabled.** The check now distinguishes `upstream_fix_exists`
+(what pip-audit knows) from `needs_action` (what somebody can do).
+
+The accepted risk is a **literal table in reviewed code, not a config file** -- accepting a known
+vulnerability should require editing code somebody reviews. Every entry must state why it cannot be
+acted on **and** `REVIEW WHEN`, enforced by three tests. **That is the difference between an accepted
+risk and an ignored one.**
+
+**Two tests failed when this was first wired, and they were RIGHT to:** a `GateReport` with no audit
+is genuinely not ok. They now supply a recorded audit -- the correct fixture, not a workaround.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
