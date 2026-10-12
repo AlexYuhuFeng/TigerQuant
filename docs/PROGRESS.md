@@ -4,7 +4,7 @@ Status: CR-00, CR-01, CR-02 and CR-07 complete. CR-03 partial (adapter built and
 a real paper round trip is blocked on a write-scoped grant). CR-06 partial (provider-neutral
 path and benchmark done; no live provider call). CR-09 partial (projector verified against
 real PostgreSQL). CR-05 substantially delivered.
-Current CR: the identity check on drift and project; CR-03 awaits the owner's consent
+Current CR: identity re-check on reconnect; CR-03 awaits the owner's consent
 Last verified commit: see `git log -1` on branch `dev`
 Last successful CI run: local equivalent only (no remote CI runner configured in this environment)
 Broker connectivity: **AUTHORIZED** — Tiger OAuth 2.0, read-only scopes, PAPER account verified
@@ -1040,6 +1040,33 @@ branch for a read that failed; the first `read_identity` caught EVERY exception 
 so that branch **could never run** and a connection reset was reported as "undeclared". The same
 class of mistake as the `_INVARIANTS` list naming checks nobody performed. Fixed by distinguishing
 SQLSTATE 42P01 from a real failure.
+
+### 2026-10-12 - CR-09 part 17: the identity guard covers every database command
+
+Full evidence: `docs/evidence/cr09_guard_coverage.txt`. 14 new tests.
+
+**A guard that covers one of three entry points is not a guard; it is a guard plus two ways around
+it.** All three now refuse the wrong database with the same message and exit 2, and the check plus
+its two flags live in a shared helper so the wording cannot drift between commands.
+
+**The insertion bug is the interesting part.** The script that added the guard used
+`text.replace(anchor, guarded, 1)` -- replacing the FIRST occurrence. **The guarded text CONTAINS
+the anchor.** So the second pass found the anchor again inside the already-guarded `_cmd_drift`,
+nested a SECOND guard there, and left `_cmd_project` completely unguarded.
+
+The behavioural check found the missing one (`project` did not refuse). **The double guard in
+`drift` was silent** -- harmless today, a latent oddity tomorrow. Three things now argue against a
+recurrence: the fix script **asserts the property** (counts the guard per handler and refuses to
+continue unless each has exactly one); the anchor must be a **whole line**, because matching it as
+a substring broke the file twice more and left it unparseable, caught immediately by ruff; and the
+test suite now **counts**, so the silent half is covered too.
+
+**And the tests found a real defect: `--declare-mode` produced a traceback.** `declare_mode` RAISES
+when a database already declares a different mode, so passing `--declare-mode` against the wrong
+database produced an uncaught `ConfigurationError` instead of a clean refusal. **The refusal was
+correct; its delivery was not** -- a traceback is indistinguishable from a crash, and an operator
+who passes the wrong DSN *and* a helpful extra flag deserves the same message as one who does not.
+**A refusal is a decision, not an exception to leak.**
 
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 

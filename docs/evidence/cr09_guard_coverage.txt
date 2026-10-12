@@ -1,0 +1,103 @@
+TigerQuant CR-09 evidence (part 17) - the identity guard now covers every database command
+Generated: see the git commit this file was added in
+
+Closes the limitation part 16 recorded: "ONLY `supervise` CHECKS THE IDENTITY. `tigerquant drift`
+and `tigerquant project` still take a DSN and a mode without asserting they agree, so the same
+defect remains reachable through those commands."
+
+**A guard that covers one of three entry points is not a guard; it is a guard plus two ways around
+it.**
+
+===========================================================================
+1. Observed, all three commands
+===========================================================================
+$ tigerquant drift   out/id3/j.jsonl --dsn .../tq_backtest --mode PAPER
+$ tigerquant project out/id3/j.jsonl --dsn .../tq_backtest --mode PAPER
+$ tigerquant supervise out/id3/j.jsonl --dsn .../tq_backtest --mode PAPER
+
+    refusing to use this database: this database declares itself 'BACKTEST' but 'PAPER' was
+    expected (declared by probe at 2026-10-12 01:20:57+00:00). Every mode has its own database,
+    so this is the wrong one to be reconciling against.                        (exit 2, all three)
+
+$ tigerquant project out/id3/j.jsonl --dsn .../tq_backtest --mode BACKTEST
+    consistent: 31 event(s), 1 order(s), cash 95179.48                          (exit 0)
+
+The guard is a shared `_assert_database_identity` helper and a shared `_add_identity_arguments`,
+so the wording and the two flags cannot drift between commands.
+
+===========================================================================
+2. THE INSERTION BUG, which is the interesting part
+===========================================================================
+The script that added the guard used `text.replace(anchor, guarded, 1)` -- replacing the FIRST
+occurrence. **The guarded text CONTAINS the anchor.** So the second pass found the anchor again
+inside the already-guarded `_cmd_drift`, nested a SECOND guard there, and left `_cmd_project`
+completely unguarded.
+
+Result: `drift` guarded twice, `project` not at all. The behavioural check showed `project` not
+refusing, which is how it was found -- but the DOUBLE guard in `drift` was silent. It would have
+run the identity check twice, which is harmless today and a latent oddity tomorrow.
+
+THREE THINGS THIS ARGUES FOR, all of which are now in place:
+
+1. **Assert the PROPERTY, not the edit.** The fix script ends by counting the guard in each handler
+   and REFUSING TO CONTINUE unless `_cmd_drift` has one and `_cmd_project` has one. The previous
+   script had no such assertion.
+2. **Match a WHOLE LINE, not a substring.** The repair then broke the file twice more, because
+   `"    journal_file = Path(args.journal)"` matched as a SUBSTRING of the 8-space-indented line
+   inside `with connection:`. The guard was inserted mid-line and left the file unparseable --
+   caught immediately by ruff, which is the argument for running the linter on every change rather
+   than at the end.
+3. **Count, in the test suite.** `test_every_database_handler_calls_it_exactly_once` and
+   `test_the_double_insertion_bug_cannot_recur_silently` are structural, so the SILENT half of this
+   bug is now caught too.
+
+===========================================================================
+3. A REAL DEFECT THE TESTS FOUND: --declare-mode produced a traceback
+===========================================================================
+`_assert_database_identity` calls `declare_mode` when the verdict is refused. `declare_mode`
+RAISES when the database already declares a DIFFERENT mode. So `--declare-mode` against the wrong
+database produced an **uncaught ConfigurationError** -- a traceback -- instead of the clean refusal
+and exit 2 that every other path produces.
+
+**The refusal was correct; its DELIVERY was not.** An operator who passes the wrong DSN *and* a
+helpful extra flag should get the same message as one who does not, and a traceback is
+indistinguishable from a crash.
+
+Fixed in both `cli.py` and `supervisor_cli.py`: the `ConfigurationError` is caught and turned into
+the refusal message. **A refusal is a decision, not an exception to leak.**
+
+===========================================================================
+4. Test results
+===========================================================================
+$ python -m pytest tests -q
+996 passed
+
+$ python -m pytest tests/unit/test_database_guard_coverage.py -q
+14 passed
+
+$ python -m ruff check src tests tools
+All checks passed!
+
+$ python -m mypy
+Success: no issues found in 101 source files
+
+$ python -m tigerquant doctor
+4/4 safety checks passing
+
+===========================================================================
+5. Limitations
+===========================================================================
+1. The migration creates an EMPTY identity table, so every existing database is undeclared until
+   someone runs `--declare-mode` once. The guard is INERT until then -- deliberate, since SQL
+   cannot know which mode a database is for, but it means the protection is opt-in per database.
+2. Nothing re-checks the identity on RECONNECT. The guard runs once, before the loop or the
+   projection; a reconnect that landed on a different database would not be caught.
+3. Only `drift`, `project` and `supervise` are guarded. Any FUTURE command that opens a database
+   must remember to call the helper, and nothing enforces that beyond the two structural tests
+   naming today's handlers.
+4. The declaration cannot be cleared through any command, so a database declared in error can only
+   be corrected outside this tool.
+5. `--declare-mode` on a database that is merely UNDECLARED stamps it with whatever mode the
+   command was given. That is the intended explicit act, but it means an operator who has the wrong
+   mode AND an undeclared database would declare the wrong thing, and the guard would then agree
+   with them. The check protects against a MISMATCH; it cannot protect against a first mistake.

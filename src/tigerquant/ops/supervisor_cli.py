@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tigerquant.core.enums import Mode
+from tigerquant.core.errors import ConfigurationError
 from tigerquant.db.identity import declare_mode, verify_identity
 from tigerquant.db.reconnect import ReconnectingRepository
 from tigerquant.ops.alerts import AlertRouter
@@ -288,7 +289,13 @@ def _select_repository(
     if verdict.refused and getattr(args, "declare_mode", False):
         # Declaring is the operator's explicit act, never automatic: a tool that stamped whatever
         # mode it was told to would make the guard agree with any mistake.
-        declared = declare_mode(connection, expected, declared_by="tigerquant supervise")
+        try:
+            declared = declare_mode(connection, expected, declared_by="tigerquant supervise")
+        except ConfigurationError as exc:
+            # A refusal to CHANGE a declaration is not a crash. Same fix as the CLI: the correct
+            # decision must be delivered as a refusal, not a traceback.
+            print(f"refusing to use this database: {exc}", file=sys.stderr)
+            return None, None, 2
         print(f"declared this database as {declared.mode}", file=sys.stderr)
         verdict = verify_identity(connection, expected)
 

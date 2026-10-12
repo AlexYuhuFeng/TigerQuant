@@ -219,6 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="project even though the journal has a sequence gap (not recommended)",
     )
+    _add_identity_arguments(project)
 
     drift = sub.add_parser(
         "drift",
@@ -245,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="how many checks to run when --interval-seconds is positive",
     )
     drift.add_argument("--report", type=Path, default=None, help="write the JSON report here")
+    _add_identity_arguments(drift)
 
     report = sub.add_parser(
         "report",
@@ -341,6 +343,64 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _assert_database_identity(args: argparse.Namespace, connection: object, mode: Mode) -> str:
+    """Assert the database serves ``mode``. Returns an error message, or "" when it is safe.
+
+    Every mode has its own database and a DSN is just a string, so without this a run can connect
+    to the WRONG one and report success: an empty database compared against a journal finds the
+    expected divergence, and looks exactly like a database with no rows. The failure is a false
+    NEGATIVE -- reporting health that was never checked -- which is why it is guarded at every
+    entry point rather than the convenient one.
+
+    Returns a message rather than exiting, so each command keeps its own exit-code convention.
+    """
+    from tigerquant.db.identity import declare_mode, verify_identity
+
+    verdict = verify_identity(
+        connection,
+        mode,
+        allow_undeclared=getattr(args, "allow_undeclared_database", False),
+    )
+    if verdict.refused and getattr(args, "declare_mode", False):
+        # Declaring is the operator's explicit act, never automatic: a tool that stamped whatever
+        # mode it was told to would make the guard agree with any mistake.
+        try:
+            declared = declare_mode(connection, mode, declared_by="tigerquant")
+        except ConfigurationError as exc:
+            # declare_mode REFUSES to change an existing declaration, and a refusal is not a
+            # crash. Without this, --declare-mode against the wrong database produced a traceback
+            # instead of the clean refusal every other path gives -- the correct decision delivered
+            # the wrong way. A test caught it.
+            return f"refusing to use this database: {exc}"
+        print(f"declared this database as {declared.mode}", file=sys.stderr)
+        verdict = verify_identity(connection, mode)
+
+    if verdict.refused:
+        return f"refusing to use this database: {verdict.detail}"
+    return ""
+
+
+def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
+    """The two flags every database command shares, so the wording cannot drift apart."""
+    parser.add_argument(
+        "--declare-mode",
+        action="store_true",
+        help=(
+            "record this database's mode if it has none. Refused if it declares a DIFFERENT "
+            "mode, because every row in it was written under the old assumption."
+        ),
+    )
+    parser.add_argument(
+        "--allow-undeclared-database",
+        action="store_true",
+        help=(
+            "use a database that does not declare its mode, on the operator's word. Does NOT "
+            "extend to a MISMATCH: connecting to a database declared as another mode is refused "
+            "either way."
+        ),
+    )
+
+
 def _cmd_drift(args: argparse.Namespace) -> int:
     """Compare the journal with the database and report.
 
@@ -357,6 +417,11 @@ def _cmd_drift(args: argparse.Namespace) -> int:
         return 2
     except TigerQuantError as exc:
         print(f"cannot reach the database: {exc}", file=sys.stderr)
+        return 2
+
+    refused = _assert_database_identity(args, connection, mode)
+    if refused:
+        print(refused, file=sys.stderr)
         return 2
 
     journal_file = Path(args.journal)
@@ -567,6 +632,15 @@ def _cmd_project(args: argparse.Namespace) -> int:
         return 2
     except TigerQuantError as exc:
         print(f"cannot reach the database: {exc}", file=sys.stderr)
+        return 2
+
+    # Assert the database serves this mode BEFORE anything is written to it. Every mode has its
+    # own database and a DSN is just a string, so without this a run can project into the WRONG one
+    # and report success -- an empty database compared against a journal looks exactly like a
+    # database with no rows.
+    refused = _assert_database_identity(args, connection, mode)
+    if refused:
+        print(refused, file=sys.stderr)
         return 2
 
     with connection:
