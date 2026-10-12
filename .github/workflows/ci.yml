@@ -58,6 +58,12 @@ jobs:
       - name: Typecheck (strict)
         run: uv run --frozen mypy
 
+      - name: "Record the dependency audit"
+        # The fast lane asserts that `gates` REPORTS a recorded audit, and that an unrun audit
+        # FAILS. That means the environment which runs the tests has to produce the record --
+        # otherwise the assertion can never hold in a fresh clone, which is what CI is.
+        run: uv run --frozen python -m tigerquant gates --record-audit
+
       - name: "Tests (fast lane: no network, no broker, no model)"
         run: uv run --frozen pytest -q --cov=tigerquant --cov-report=term-missing
 

@@ -278,12 +278,26 @@ def pytest_collection_finish(session: object) -> None:
     import json
     from pathlib import Path
 
-    # ONLY a full-suite run may write the record. Running a single file would otherwise clobber
-    # it, and the documented counts describe the WHOLE suite -- so the check would start comparing
-    # full-suite claims against a subset and report a stale count that was never stale. Found by
-    # running one test file after the count check was working.
+    # ONLY a full-suite run may write the record, or a single-file run would clobber it with that
+    # subset's count and the documented numbers would be compared against a fragment.
+    #
+    # A FULL-SUITE run is one with NO POSITIONAL path argument. The first version required every
+    # argument to be `tests`, which held locally (`pytest tests -q`) and was FALSE in CI
+    # (`pytest -q --cov=...`), so CI never recorded a count and the check reported the documents as
+    # stale against `actual -1`. **A definition of "full suite" that depends on how a developer
+    # types the command is not a definition.**
+    #
+    # The distinction is POSITIONAL versus OPTION arguments, not "any argument at all":
+    #
+    #   local: pytest tests -q                      -> positional ['tests']              -> full
+    #   CI:    pytest -q --cov=tigerquant           -> positional []                     -> full
+    #   one:   pytest tests/unit/test_gates.py -q   -> positional ['tests/unit/test...']  -> narrowed
+    #
+    # Missing either of the first two is what broke: the original rule recognised only the local
+    # spelling, and "no arguments at all" would recognise only the CI one.
     args = [str(arg) for arg in getattr(getattr(session, "config", None), "args", []) or []]
-    full_suite = not args or all(arg in {"tests", "tests/"} for arg in args)
+    positional = [arg for arg in args if not arg.startswith("-")]
+    full_suite = all(arg.rstrip("/\\") in {"tests"} for arg in positional)
     if not full_suite:
         return
 
