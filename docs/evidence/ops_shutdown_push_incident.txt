@@ -1,0 +1,82 @@
+TigerQuant ops note - the 23:00 shutdown push failed, and why the pusher was the reason
+Generated: see the git commit this file was added in
+
+Two failures in one night, both worth recording because the second is a design defect rather than
+bad luck.
+
+===========================================================================
+1. What happened
+===========================================================================
+The user asked for the machine to be off at 23:00 with progress pushed by then. A scheduled task
+`TigerQuant-PushThenShutdown` was registered to push at 22:50, then wait, then shut down at 23:00.
+It was dry-run tested and the shutdown privilege was verified separately.
+
+Outcome:
+
+  * The machine shut down at 23:00 as asked. That part worked.
+  * The 22:50 push did NOT complete. My own in-flight push (started 20:34, seconds before the
+    shutdown) failed with `getaddrinfo failed` -- DNS was already going down -- and the scheduled
+    task's log shows only the earlier DRY RUN, never a real run.
+  * On boot the next morning the task fired LATE (LastRunTime 2026/10/11 03:17:49) because
+    `StartWhenAvailable` was set, and was TERMINATED (LastTaskResult 267014 = 0x41306) before it
+    pushed anything.
+  * `out/PUSH_FAILED.txt` was never written, because the task was killed before reaching the
+    failure branch. So the loud failure signal designed for exactly this case did not fire.
+
+Result: one commit (`d536b50`, the `supervise` command) sat un-pushed for a day. GitHub showed 32
+commits while local had 33.
+
+===========================================================================
+2. The design defect that made it fragile
+===========================================================================
+`tools/push_via_api.py` REPLAYED THE WHOLE HISTORY on every run. A one-commit change re-uploaded
+33 commits and all their blobs. That took minutes when the network was healthy and hung
+indefinitely when it was marginal -- and it was marginal precisely when the deadline was closest.
+
+`--skip-commits` existed and was WRONG for this: it sliced the history but left `parent_commit` as
+None, so the first replayed commit would have had no parent and ORPHANED the branch rather than
+appending to it. A resume flag that could silently rewrite history is worse than no flag.
+
+===========================================================================
+3. The fix: resume from the remote HEAD
+===========================================================================
+The remote's commit COUNT is how many local commits are already there, because this script creates
+exactly one remote commit per local commit. The shas never match -- the API assigns its own -- so
+the count is the only reliable cursor, and it is a reliable one.
+
+    remote has 32 commit(s); replaying 1 new one(s) from dev -> main
+      [1/1] d536b504 -> cb48aeed feat(CR-09): the `tigerquant supervise` command, ...
+    updated main -> cb48aeed
+
+Seconds instead of minutes. The first replayed commit is now based on the remote HEAD, so it
+APPENDS rather than orphaning, and the depth walk is capped at 10,000 so a cyclic history cannot
+hang the push for ever.
+
+Verified after: 33 commits on GitHub, and `supervisor_cli.py`, `supervisor.py` and
+`cr09_supervise_cli.txt` all byte-identical between local and remote.
+
+===========================================================================
+4. What this says about the deadline arrangement
+===========================================================================
+The push-then-shutdown task was the right SHAPE -- one script, push first, shutdown second, so the
+ordering is guaranteed. It failed for two reasons that were both avoidable:
+
+  1. the push itself was slow and fragile, which is now fixed; and
+  2. `StartWhenAvailable` turned a missed trigger into a LATE trigger that ran while the machine
+     was still settling, and it was terminated. For a shutdown-critical task, a missed trigger
+     should be reported as missed rather than fired four hours later, because a push at 03:17 is
+     not the push the user asked for at 22:50.
+
+Recommendation for next time: keep the push-then-shutdown shape, and have the task write its
+outcome BEFORE attempting the shutdown, so a termination cannot destroy the only record of whether
+the push succeeded. `out/PUSH_FAILED.txt` was the right idea in the wrong place -- written at the
+END of the failure path, which is the last thing to run.
+
+===========================================================================
+5. Current state
+===========================================================================
+  local  d536b50
+  remote cb48aeed (33 commits, content verified identical)
+  tree   clean
+  tests  909 passed, 1 xfail-free suite
+  doctor 4/4 safety checks

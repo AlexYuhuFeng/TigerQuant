@@ -94,6 +94,32 @@ def api(method: str, path: str, payload: dict[str, object] | None, auth: str) ->
     raise SystemExit(msg)
 
 
+def remote_head(repo: str, branch: str, auth: str) -> tuple[int, str | None, str | None]:
+    """(how many commits the remote has, its HEAD sha, its HEAD tree sha).
+
+    The count is how many LOCAL commits are already there, because this script creates exactly one
+    remote commit per local commit. That is what makes an incremental push possible without the
+    shas matching -- which they never will, since the API assigns its own.
+    """
+    ref = api("GET", f"/repos/{repo}/git/ref/heads/{branch}", None, auth)
+    if "object" not in ref:
+        return 0, None, None
+    head = str(ref["object"]["sha"])
+    depth = 0
+    cursor: str | None = head
+    while cursor:
+        commit = api("GET", f"/repos/{repo}/git/commits/{cursor}", None, auth)
+        if "tree" not in commit:
+            break
+        depth += 1
+        parents = commit.get("parents") or []
+        cursor = str(parents[0]["sha"]) if parents else None
+        if depth > 10_000:  # a cycle would otherwise hang the push for ever
+            break
+    tree = api("GET", f"/repos/{repo}/git/commits/{head}", None, auth).get("tree", {})
+    return depth, head, str(tree.get("sha")) if tree else None
+
+
 def commits_oldest_first(branch: str) -> list[str]:
     listing = git("rev-list", "--reverse", branch)
     return [line for line in listing.splitlines() if line.strip()]
@@ -164,12 +190,28 @@ def main() -> int:
     args = parser.parse_args()
 
     auth = token()
-    history = commits_oldest_first(args.branch)[args.skip_commits :]
-    print(f"replaying {len(history)} commit(s) from {args.branch} -> {args.remote_branch}")
+    everything = commits_oldest_first(args.branch)
+    depth, remote_sha, remote_tree = remote_head(args.repo, args.remote_branch, auth)
+
+    # Resume from what the remote already has. `--skip-commits` still wins when given, so the
+    # old behaviour is available for a deliberate full replay.
+    start = args.skip_commits or depth
+    if start > len(everything):
+        print(f"remote has {depth} commit(s) but local has {len(everything)}; nothing to push")
+        return 0
+    history = everything[start:]
+    print(
+        f"remote has {depth} commit(s); replaying {len(history)} new one(s) "
+        f"from {args.branch} -> {args.remote_branch}"
+    )
+    if not history:
+        print("already up to date")
+        return 0
 
     blobs: dict[str, str] = {}
-    parent_commit: str | None = None
-    parent_tree: str | None = None
+    # The FIRST replayed commit is based on the remote HEAD, so it APPENDS rather than orphaning.
+    parent_commit: str | None = remote_sha
+    parent_tree: str | None = remote_tree
 
     for index, commit in enumerate(history, start=1):
         entries: list[dict[str, object]] = []
