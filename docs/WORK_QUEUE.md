@@ -64,8 +64,13 @@ Last updated: 2026-10-10.
    acceptance item is a real paper round trip, and it cannot be faked or worked around.
 2. **No remote CI runner.** `.github/workflows/ci.yml` is written and its commands are executed
    locally with identical results, but no GitHub run exists to link.
-3. **No PyPI advisory access for `pip-audit`.** The audit command is wired into CI but could not
-   run here; it is not reported as passing.
+3. **`pip-audit` NOW RUNS and reports ONE UNFIXABLE FINDING.** The earlier note here said advisory
+   access was unavailable and the audit "could not run" -- **that stopped being true and was never
+   retested**, while carrying a gate item. It now reports `fsspec 2026.2.0`, `CVE-2026-104851`.
+   `nautilus_trader==1.231.0` pins `fsspec==2026.2.0` EXACTLY and is the latest release, so there is
+   no constraint and no upgrade that fixes it. `fsspec.open` is reached only from nautilus entry
+   points this project does not invoke, but **the CVE's nature has NOT been assessed**, so this is a
+   located risk and not a cleared one. See `docs/evidence/dependency_audit.txt`.
 4. **Docker Hub is unreachable** from this network. `deploy/compose.yaml` pulls the same official
    Postgres image through `public.ecr.aws`; the digest is recorded in
    `docs/evidence/cr05_database.txt`.

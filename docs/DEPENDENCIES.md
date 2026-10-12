@@ -58,7 +58,7 @@ command fails instead of silently resolving something new.
 | PowerShell/SChannel TLS is disabled in the sandbox | `curl` and `Invoke-WebRequest` fail with `SEC_E_NO_CREDENTIALS` | use Python's OpenSSL stack: `uv`, `python -m pip`, `tools/pypi_probe.py` |
 | `uv`'s default cache is outside the workspace | `Failed to initialize cache … os error 5` | `UV_CACHE_DIR` pointed at a writable directory |
 | System temp is not writable for nested directories | pytest's `tmp_path` raises `PermissionError` | `tests/conftest.py` overrides `tmp_path` to a repository-local directory |
-| `pip-audit` needs its remote advisory database | cannot run offline | wired into CI; **not** reported as passing here |
+| `pip-audit` needs its remote advisory database | WAS "cannot run offline" -- **that stopped being true and was never retested** | Runs. Reports `fsspec 2026.2.0`, `CVE-2026-104851`, which cannot be fixed at the pinned engine version. See `docs/evidence/dependency_audit.txt` | here |
 
 ## Updating a pin
 

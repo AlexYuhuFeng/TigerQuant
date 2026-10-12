@@ -1,0 +1,98 @@
+TigerQuant - dependency security audit, EXECUTED for the first time
+Generated: see the git commit this file was added in
+
+The gates require "package dependency security checks". Every previous round recorded this as **NOT
+EXECUTED** rather than passing, because the advisory service appeared unreachable. This round it ran,
+and it found something.
+
+===========================================================================
+1. What changed
+===========================================================================
+`pip-audit 2.10.1` is installed in the venv, and every advisory endpoint is now reachable --
+including `github.com`, which timed out in earlier rounds. The network is not what it was when the
+"cannot run" note was written, and the note was never retested.
+
+    $ python -m pip_audit
+    Name   Version  ID              Fix Versions
+    fsspec 2026.2.0 CVE-2026-104851 2026.6.0
+
+    Found 1 known vulnerability in 1 package
+
+That retest is the finding of this round as much as the CVE is: **a limitation recorded once and
+never rechecked is a limitation that may no longer be true**, and it was carrying a gate item.
+
+===========================================================================
+2. The vulnerability
+===========================================================================
+`fsspec` is a TRANSITIVE dependency, pulled by `nautilus_trader`, which is the CR-04 engine.
+
+It cannot be fixed here, and that is established rather than assumed:
+
+    $ uv lock     # with "fsspec>=2026.6.0" added
+    Because nautilus-trader==1.231.0 depends on fsspec==2026.2.0 and
+    tigerquant[engine] depends on fsspec>=2026.6.0, we conclude that
+    nautilus-trader==1.231.0 and tigerquant[engine] are incompatible.
+
+**`nautilus_trader` pins fsspec EXACTLY.** And:
+
+    $ latest nautilus_trader on PyPI: 1.231.0
+      its fsspec requirement:        fsspec==2026.2.0
+
+**1.231.0 is the latest release.** So there is no constraint that fixes this and no upgrade that
+fixes it. The floor was added, refused, and REVERTED -- `pyproject.toml` records why rather than
+carrying a constraint that cannot lock.
+
+The pinning discipline that CR-04 exists to enforce is exactly what makes this unfixable. That is
+not a criticism: an engine whose API was verified against a specific release is worth more than a
+transitive patch bump, and the alternative is re-verifying the adapter against an unreleased version.
+
+===========================================================================
+3. Exposure, assessed as far as it goes
+===========================================================================
+`fsspec` is used inside nautilus in these places:
+
+    backtest/__main__.py   fsspec.open(fsspec_url, "rb")
+    live/__main__.py       fsspec.open(fsspec_url, "rb")
+    persistence/config.py
+    persistence/writer.py
+
+**TigerQuant does not invoke any of them.** It uses `nautilus_trader` only through
+`adapters/nautilus/execution_client.py`, and does not use the backtest or live entry points, nor the
+Parquet data catalog. So the code paths that reach `fsspec.open` are not exercised by this project.
+
+**That is a reduction in likelihood, not a proof of safety, and the distinction matters.** The
+attack surface depends on what CVE-2026-104851 actually does, and **that has NOT been assessed.**
+
+===========================================================================
+4. What is NOT claimed
+===========================================================================
+- **The dependency audit does NOT pass.** It reports one vulnerability.
+- **The vulnerability is NOT fixed.** It cannot be, at the pinned engine version.
+- **Exposure is NOT proven to be zero.** Only that the call sites are unreachable through this
+  project's own code.
+- **The CVE's nature is NOT established.** Whether it needs a crafted URL, a malicious archive, or
+  something reachable through a config value is unknown, and until it is known the risk cannot be
+  rated -- only located.
+
+===========================================================================
+5. What should happen next
+===========================================================================
+1. **Assess CVE-2026-104851 properly**: what it requires and whether any path from TigerQuant's
+   configuration could reach `fsspec.open` through nautilus.
+2. **Track it**: a `pip-audit` run belongs in the gate command rather than in a human's memory, so
+   the next round that CAN fix it is told so.
+3. **Re-examine the "cannot run" limitations** recorded in earlier rounds. At least one was no
+   longer true, and it was carrying a gate item.
+
+===========================================================================
+6. Limitations of this audit
+===========================================================================
+1. `pip-audit` audits the INSTALLED environment, which includes extras that a given deployment may
+   not use. A backend-only deployment would not have `nautilus_trader` at all, and therefore not
+   this vulnerability.
+2. `tigerquant` itself is reported as unauditable ("not found on PyPI"), which is correct and
+   expected for a local package.
+3. The audit ran against the venv, not against `uv.lock`. Auditing the lockfile would also cover
+   extras that are not installed; the two can disagree.
+4. One run is a snapshot. Advisory data changes daily, which is the argument for (2) above.
+5. `bandit` and `detect-secrets` are declared as dev dependencies and were not run this round.

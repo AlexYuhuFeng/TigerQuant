@@ -1337,6 +1337,40 @@ another **builds a fact with a deliberate typo** and shows it is accepted. Wirin
 change and has real blast radius (existing tests use `"earnings"`), so it is recorded rather than
 made late in a round.
 
+### 2026-10-12 - The dependency audit RAN, and found something
+
+Full evidence: `docs/evidence/dependency_audit.txt`. The gates require "package dependency security
+checks"; every previous round recorded this as **NOT EXECUTED** rather than passing, because the
+advisory service appeared unreachable.
+
+**It was worth retesting.** `pip-audit 2.10.1` is installed and every advisory endpoint is now
+reachable -- including `github.com`, which timed out in earlier rounds. **A limitation recorded once
+and never rechecked is a limitation that may no longer be true**, and this one was carrying a gate
+item.
+
+```
+fsspec 2026.2.0  CVE-2026-104851  fix: 2026.6.0
+```
+
+**It cannot be fixed here, and that is established rather than assumed.** `nautilus_trader==1.231.0`
+pins `fsspec==2026.2.0` EXACTLY -- `uv lock` refuses the floor as unsatisfiable -- and **1.231.0 is
+the latest release**, so there is no upgrade path either. The floor was added, refused, and
+**reverted**; `pyproject.toml` records why rather than carrying a constraint that cannot lock.
+
+**The pinning discipline CR-04 exists to enforce is exactly what makes this unfixable.** That is not
+a criticism: an engine whose API was verified against a specific release is worth more than a
+transitive patch bump, and the alternative is re-verifying the adapter against an unreleased version.
+
+**Exposure, as far as it goes.** `fsspec.open` appears in nautilus only in `backtest/__main__.py`,
+`live/__main__.py` and the Parquet persistence layer. **TigerQuant invokes none of them** -- it uses
+the engine only through `adapters/nautilus/execution_client.py`. That is **a reduction in likelihood,
+not a proof of safety**: whether the CVE needs a crafted URL, a malicious archive, or something
+reachable through a config value is **unknown, and has NOT been assessed.**
+
+**What is NOT claimed:** the audit does not pass; the vulnerability is not fixed; exposure is not
+proven zero; and the CVE's nature is not established. What this round did is locate the risk and
+establish that it is unfixable here -- which is a different thing from clearing it.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.

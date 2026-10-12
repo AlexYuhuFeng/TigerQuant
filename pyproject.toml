@@ -35,7 +35,13 @@ dev = [
 ]
 broker = ["tigeropen==3.8.0"]        # CR-02/CR-03
 db = ["psycopg[binary]==3.2.12"]     # projection store (ADR-0013)
-engine = ["nautilus_trader==1.231.0"]  # CR-04
+engine = [
+  "nautilus_trader==1.231.0",  # CR-04
+  # NOTE: nautilus_trader 1.231.0 pins fsspec==2026.2.0 EXACTLY, and that version carries
+  # CVE-2026-104851. The floor cannot be raised here -- `uv lock` refuses as unsatisfiable --
+  # and 1.231.0 is the LATEST nautilus release, so there is no upgrade path either. Recorded
+  # rather than worked around: docs/evidence/dependency_audit.txt.
+]
 llm = ["litellm==1.104.2"]            # CR-06
 dashboard = [                          # CR-08
   "fastapi==0.143.0",
