@@ -401,9 +401,28 @@ def compare_traces(left: ExecutionTrace, right: ExecutionTrace) -> ParityReport:
     return ParityReport(left=left, right=right, divergences=tuple(divergences))
 
 
+#: Broker states that PROVE no exposure resulted.
+#:
+#: **`UNKNOWN` IS NOT ONE OF THEM, AND ITS ABSENCE IS THE POINT.** A timeout or transport error after a
+#: submission may have been ACCEPTED by the venue (ADR-0008), so "we do not know" is not "nothing
+#: happened". Treating it as no exposure is the failure AGENTS.md invariant 8 exists to prevent: never
+#: repeat a submission on an uncertain outcome, and reconcile before a restart permits new exposure.
+#:
+#: The previous version of this helper included `UNKNOWN` and its docstring said "means no exposure
+#: resulted". It was harmless only because nothing called it.
+_NO_EXPOSURE_STATES: frozenset[BrokerOrderState] = frozenset(
+    {BrokerOrderState.REJECTED, BrokerOrderState.CANCELED}
+)
+
+
 def empty_or_unfilled(state: BrokerOrderState) -> bool:
-    """True when a broker state means no exposure resulted."""
-    return state in {BrokerOrderState.REJECTED, BrokerOrderState.CANCELED, BrokerOrderState.UNKNOWN}
+    """True when a broker state PROVES no exposure resulted.
+
+    **`UNKNOWN` returns False**, because an outcome nobody established is not evidence of nothing.
+    A caller that wants "no exposure OR unresolved" must say so itself rather than getting it by
+    accident -- the two lead to different actions: one is safe to forget, the other must be reconciled.
+    """
+    return state in _NO_EXPOSURE_STATES
 
 
 def at(instant: dt.datetime) -> dt.datetime:

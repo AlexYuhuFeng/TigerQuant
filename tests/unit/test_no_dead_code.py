@@ -59,11 +59,6 @@ KNOWN_DEAD: dict[str, str] = {
     "attribute_map": (
         "evidence/lineage.py -- same shape as price_attribute_names, and the same uncertainty."
     ),
-    "empty_or_unfilled": (
-        "execution/parity.py -- a predicate nothing consults. THIS ONE IS SUSPICIOUS: parity that does "
-        "not check for unfilled orders may be missing a case, so it is worth a look rather than a "
-        "deletion."
-    ),
 }
 
 SKIP = frozenset({"main", "build_parser"})
@@ -145,6 +140,29 @@ class TestNoNewDeadCode:
     def test_each_listed_name_is_still_dead(self, name: str) -> None:
         """Per-name, so a failure says WHICH entry rotted rather than only that the set changed."""
         assert name in _dead_definitions(), f"{name} is no longer dead"
+
+    def test_the_trap_that_was_flagged_has_been_removed(self) -> None:
+        """`empty_or_unfilled` was flagged as "possibly a missing parity case". It was NEITHER dead
+        code to delete NOR a missing case: **it was a dead predicate whose semantics were WRONG.**
+
+        It reported `True` for `BrokerOrderState.UNKNOWN`, whose docstring said "means no exposure
+        resulted" -- while ADR-0008 says a timeout after a submission may have been ACCEPTED. Harmless
+        only because nothing called it. **A dead helper whose semantics are wrong is a trap for whoever
+        wires it next.**
+
+        Corrected rather than deleted, so the distinction is written down where the next person will
+        look. Asserted from the BEHAVIOUR, not from the list.
+        """
+        from tigerquant.execution.broker import BrokerOrderState
+        from tigerquant.execution.parity import empty_or_unfilled
+
+        assert empty_or_unfilled(BrokerOrderState.UNKNOWN) is False, (
+            "UNKNOWN is treated as no exposure again; ADR-0008 says an uncertain outcome may have "
+            "been accepted, so this predicate must not report that nothing happened"
+        )
+        assert "empty_or_unfilled" not in KNOWN_DEAD, (
+            "it is listed as dead while being tested; the list has outlived its subject"
+        )
 
     def test_the_evidence_persistence_gap_is_closed(self) -> None:
         """`write_report` was the most consequential entry: a function whose docstring says it persists

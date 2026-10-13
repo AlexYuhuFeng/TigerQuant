@@ -1682,6 +1682,35 @@ temporary directory, which the DSH policy denies -- so the tool now takes a work
 The dead-code list loses its `write_report` entry, and the closure is asserted **from the call site**
 rather than from the list, so removing the wiring fails the test. A list entry could not detect that.
 
+### 2026-10-13 - The flagged dead helper was a wrong predicate, not a missing case
+
+Last round's sweep flagged `empty_or_unfilled` in `execution/parity.py` as *"possibly a MISSING PARITY
+CASE rather than dead code"*. **It was neither.**
+
+    def empty_or_unfilled(state) -> bool:
+        """True when a broker state means no exposure resulted."""
+        return state in {REJECTED, CANCELED, UNKNOWN}
+
+**`UNKNOWN` MEANS THE OUTCOME IS UNKNOWN.** ADR-0008 says a timeout or transport error after a
+submission may have been ACCEPTED, and AGENTS.md invariant 8 says never to repeat a submission on an
+uncertain outcome and to reconcile before a restart permits new exposure. **A helper reporting "no
+exposure resulted" for UNKNOWN is the exact mistake both rules exist to prevent.**
+
+It was harmless only because nothing called it -- which is why the sweep saw it as dead code rather than
+as a bug. **A dead helper whose semantics are wrong is a trap for whoever wires it next**, and this
+project has an inventory of things that look ready and are not.
+
+**CORRECTED RATHER THAN DELETED.** Deleting removes the trap and also removes the place the distinction
+is written down; a corrected version names the two states that PROVE no exposure and says why UNKNOWN is
+not one of them.
+
+**The invariant is now tested over EVERY other state**, not just the two that mattered, so a state added
+later is safe by default. **A predicate that defaults to "nothing happened" is the wrong default for
+exposure** -- the safe answer to an unrecognised state is that it must be reconciled.
+
+The dead-code list loses the entry, and the behaviour is asserted directly, because a list entry could
+not detect a semantic regression.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
