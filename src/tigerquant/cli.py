@@ -429,8 +429,18 @@ def _cmd_gates(args: argparse.Namespace) -> int:
     disabled. What must never pass silently is a case with no evidence at all.
     """
     if getattr(args, "record_audit", False):
+        # RECORD, then report the AUDIT and exit on the AUDIT's status only.
+        #
+        # Exit on the whole report and CI cannot use this step: the count record is produced by the
+        # PYTEST RUN, which happens after this, so gates correctly reports the documented counts as
+        # stale and exits 1. The flag's contract is the dependency audit, and asserting more than the
+        # flag's own subject is how a step becomes unrunnable in the environment that needs it.
         recorded = record_audit()
         print(f"audit recorded: {recorded.describe()}")
+        actionable = recorded.actionable_findings
+        if not recorded.ran or actionable:
+            raise SystemExit(1)
+        raise SystemExit(0)
 
     report = verify_gates()
     if args.json:
