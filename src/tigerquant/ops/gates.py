@@ -40,6 +40,7 @@ __all__ = [
     "CriticalCase",
     "DocumentedCount",
     "GateReport",
+    "_recorded_invocations",
     "check_documented_counts",
     "collect_node_ids",
     "read_audit_record",
@@ -132,6 +133,11 @@ class DocumentedCount:
     marker: str
     claimed: int
     actual: int
+    #: Set when no recorded run invoked this exact command, so nothing can confirm the claim.
+    #: A THIRD STATE, distinct from "stale" (a run happened and disagreed) and from "clean" (a
+    #: run happened and agreed). Collapsing it into "stale" is what this replaces -- it made a
+    #: filtered lane call correct documents wrong.
+    unverified_reason: str = ""
 
     @property
     def matches(self) -> bool:
@@ -146,6 +152,11 @@ class DocumentedCount:
         return self.claimed == self.actual
 
     def describe(self) -> str:
+        if self.unverified_reason:
+            return (
+                f"documented count [NOT VERIFIED] {self.label}: claims {self.claimed}, and "
+                f"{self.unverified_reason}"
+            )
         verdict = "OK" if self.matches else "STALE"
         return (
             f"documented count [{verdict}] {self.label}: claims {self.claimed}, "
@@ -178,11 +189,11 @@ _COUNT_LINE = re.compile(r"\|\s*`(?P<label>pytest[^`]*)`[^|]*\|\s*\*\*(?P<count>
 
 
 def _collect_count(marker: str, *, root: Path | None = None) -> int:
-    """How many tests the last REAL run collected for this marker. -1 when there is no record.
+    """How many tests the recorded run FOR THIS INVOCATION collected. -1 when there is none.
 
-    Read from a file rather than obtained by spawning pytest: subprocess execution does not
-    complete here. A missing record is -1, which cannot equal any real count, so an absent file
-    FAILS the check rather than passing it silently.
+    The key is the `-m` expression, because that is what makes two counts comparable. A run that
+    deselected 156 tests and a run that deselected none are measuring different things, and comparing
+    them was the defect this replaces.
     """
     key = _MARKER_KEYS.get(marker)
     if key is None:
@@ -194,8 +205,28 @@ def _collect_count(marker: str, *, root: Path | None = None) -> int:
         return -1
     if not isinstance(loaded, dict):
         return -1
-    value = loaded.get(key)
-    return int(value) if isinstance(value, int) else -1
+    runs = loaded.get("runs")
+    if not isinstance(runs, dict):
+        return -1
+    for invocation, counts in runs.items():
+        # Match on the marker expression, ignoring any positional suffix a narrowed run added.
+        if str(invocation).split(" -- ")[0].strip() != marker.strip():
+            continue
+        if isinstance(counts, dict) and isinstance(counts.get(key), int):
+            return int(counts[key])
+    return -1
+
+
+def _recorded_invocations(*, root: Path | None = None) -> tuple[str, ...]:
+    """Which invocations have been measured. Used to explain WHY a count is unverified."""
+    base = root or REPO_ROOT
+    try:
+        loaded: object = json.loads((base / COLLECTED_COUNTS).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("runs"), dict):
+        return ()
+    return tuple(sorted(str(name) for name in loaded["runs"]))
 
 
 def check_documented_counts(*, root: Path | None = None) -> tuple[DocumentedCount, ...]:
@@ -215,15 +246,27 @@ def check_documented_counts(*, root: Path | None = None) -> tuple[DocumentedCoun
     for match in _COUNT_LINE.finditer(document):
         claimed[match.group("label").strip()] = int(match.group("count"))
 
-    return tuple(
-        DocumentedCount(
-            label=label,
-            marker=marker,
-            claimed=claimed.get(label, -1),
-            actual=_collect_count(marker, root=base),
+    invocations = _recorded_invocations(root=base)
+    results = []
+    for label, marker in _DOCUMENTED_COMMANDS:
+        actual = _collect_count(marker, root=base)
+        reason = ""
+        if actual < 0:
+            recorded = ", ".join(repr(name) for name in invocations) or "none"
+            reason = (
+                f"no recorded run invoked it. Recorded invocations: {recorded}. A count is only "
+                f"comparable against a run that used the same command."
+            )
+        results.append(
+            DocumentedCount(
+                label=label,
+                marker=marker,
+                claimed=claimed.get(label, -1),
+                actual=actual,
+                unverified_reason=reason,
+            )
         )
-        for label, marker in _DOCUMENTED_COMMANDS
-    )
+    return tuple(results)
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,7 +517,10 @@ class GateReport:
         # available fix does not fail -- it cannot be acted on, and a gate that fails on the
         # unactionable gets disabled.
         audit_ok = self.audit.ran and not self.audit.actionable_findings
-        return not self.unproven and all(count.matches for count in self.counts) and audit_ok
+        # An UNVERIFIED count does not fail: no run invoked that command, so nothing disagrees.
+        # A STALE count does fail: a run happened and the document was wrong.
+        counts_ok = all(count.matches or count.unverified_reason for count in self.counts)
+        return not self.unproven and counts_ok and audit_ok
 
     def summary(self) -> str:
         total = len(self.results)
@@ -484,7 +530,12 @@ class GateReport:
         ]
         if self.note:
             lines.append(self.note)
-        stale = [count for count in self.counts if not count.matches]
+        stale = [
+            count for count in self.counts if not count.matches and not count.unverified_reason
+        ]
+        unverified = [count for count in self.counts if count.unverified_reason]
+        if unverified:
+            lines.append(f"UNVERIFIED DOCUMENTED COUNTS: {len(unverified)}")
         if stale:
             lines.append(f"STALE DOCUMENTED COUNTS: {len(stale)}")
         if self.audit.actionable_findings:

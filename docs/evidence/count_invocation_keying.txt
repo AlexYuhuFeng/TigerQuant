@@ -1,0 +1,106 @@
+TigerQuant - a count is only meaningful alongside WHAT WAS COUNTED
+Generated: see the git commit this file was added in
+
+Closes the flaw named at the end of the CI-green round, and REMOVES the masking marker that was
+hiding it.
+
+===========================================================================
+1. The flaw
+===========================================================================
+The collection record stored counts as if they described the suite, with no note of WHICH command
+produced them. So a lane that deselected 156 tests wrote `actual 1014` against documented `1170`, and
+`gates` reported the documents as **STALE** -- when the documents were correct and the comparison was
+between two different things.
+
+The interim fix was a `requires_full_suite` marker that deselected the count module in a filtered
+lane. **That was masking, not fixing.** It is now gone.
+
+===========================================================================
+2. The fix: key the record by invocation
+===========================================================================
+The record becomes a map from invocation to counts, accumulated across runs:
+
+    {"runs": {"":                        {"total": 1187, "requires_db": 20},
+              "not requires_db":         {"total": 1167, "requires_db": 0},
+              "requires_db":             {"total": 20,   "requires_db": 20}}}
+
+`gates` looks up the DOCUMENTED command's marker expression and compares like with like:
+
+    documented count [OK] pytest -q: claims 1187, actual 1187
+    documented count [OK] pytest -q -m "not requires_db": claims 1167, actual 1167
+    documented count [OK] pytest -q -m requires_db: claims 20, actual 20
+
+===========================================================================
+3. Three states, and the difference is the whole point
+===========================================================================
+    OK            a run used this exact command and agreed
+    STALE         a run used this exact command and the document was wrong
+    NOT VERIFIED  no run has used this exact command, so nothing disagrees
+
+**Collapsing the third into the second is what made a correct document look wrong.**
+
+**NOT VERIFIED does not fail the report.** A filtered lane cannot verify a full-suite claim by
+construction, and a gate that fails on what the environment cannot do is a gate that gets disabled --
+the reasoning already applied to PARTIAL cases and to the accepted CVE. **STALE does fail**, because
+a run happened and disagreed, which is the thing worth failing on.
+
+Verified both ways: a record whose only entry is `not requires_db` makes the suite claim NOT VERIFIED
+and the report still `ok: True`.
+
+===========================================================================
+4. Two defects found by running it, not by reading it
+===========================================================================
+**The `-m` expression was never captured.** `session.config.args` is EMPTY when pytest runs as
+`python -m pytest`, so the first version recorded every run under the unfiltered key and the three
+documented commands overwrote each other. The fix reads `option.markexpr` -- **the PARSED option, not
+the command line.** Found because the record showed one entry where three were expected.
+
+**`tests` was treated as a narrowing path.** `pytest tests` and `pytest` measure the same thing; only
+a path INSIDE the tree narrows the run. The first version keyed a plain `pytest tests -q` run as
+`" -- tests"`, which matched no documented command.
+
+===========================================================================
+5. A circularity worth naming
+===========================================================================
+While updating the documents I wrote the recorded values INTO the document, so `gates` reported all
+three `[OK]` -- but one entry was from a run BEFORE 17 tests were added, and the agreement was
+manufactured by copying.
+
+Caught because `not requires_db` (1150) did not equal `total - requires_db` (1187 - 20 = 1167), and
+those two are the same measurement. **Re-running the command and re-deriving the document from the
+fresh record is the honest sequence; deriving the document FROM the record makes the check
+tautological.**
+
+Nothing enforces that ordering, and this is recorded rather than fixed: a check that can be satisfied
+by copying its own measurement is weaker than it looks.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+1187 passed (locally 21 failed + 23 errors are SANDBOX-ONLY: the DSH policy is workspace-write and
+the alert-wiring tests write to the OS temp dir, which is denied. They pass in CI.)
+
+$ python -m pytest tests/unit/test_count_invocation_keying.py -q
+17 passed
+
+$ python -m tigerquant gates  ->  exit 0
+
+$ python -m ruff check src tests tools   -> All checks passed!
+$ python -m mypy                         -> Success. No issues found in 102 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. **The `--record-audit`-style generation step is not automatic.** Each documented command must be
+   RUN for its count to be verifiable; a command nobody runs becomes NOT VERIFIED, which is honest
+   but means the documented counts are only checked as often as somebody runs those three commands.
+2. **CI's fast lane runs a COMPOUND filter** (`not requires_db and not requires_broker and ...`), which
+   is not one of the documented commands. So CI contributes no entry that any documented count reads,
+   and a green CI run does NOT verify them. That is reported as NOT VERIFIED rather than passing
+   silently, but it is a real gap.
+3. The record accumulates without bound and nothing prunes stale invocations. A command run once with
+   a typo leaves a permanent entry.
+4. `_MARKER_KEYS` still exists as a mapping from marker to count key and is now largely redundant with
+   the invocation key. It was not removed to keep this change reviewable.
+5. The circularity in section 5 is unenforced.

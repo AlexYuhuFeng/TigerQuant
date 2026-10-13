@@ -296,9 +296,10 @@ def pytest_collection_finish(session: object) -> None:
     # Missing either of the first two is what broke: the original rule recognised only the local
     # spelling, and "no arguments at all" would recognise only the CI one.
     args = [str(arg) for arg in getattr(getattr(session, "config", None), "args", []) or []]
-    positional = [arg for arg in args if not arg.startswith("-")]
-    full_suite = all(arg.rstrip("/\\") in {"tests"} for arg in positional)
-    if not full_suite:
+    # `tests` is the suite ROOT, not a narrowing path: `pytest tests` and `pytest` measure the same
+    # thing. Only a path INSIDE the tree narrows the run.
+    positional = [arg for arg in args if not arg.startswith("-") and arg.rstrip("/\\") != "tests"]
+    if positional:
         return
 
     items = list(getattr(session, "items", []) or [])
@@ -311,16 +312,54 @@ def pytest_collection_finish(session: object) -> None:
 
     total = len(items)
     requires_db = by_marker.get("requires_db", 0)
-    payload = {
-        "total": total,
-        "requires_db": requires_db,
-        "not_requires_db": total - requires_db,
-        "written_at": dt.datetime.now(tz=dt.UTC).isoformat(),
-        "by_marker": dict(sorted(by_marker.items())),
+
+    # THE INVOCATION IS PART OF THE MEASUREMENT. Without it, counts from a filtered lane are compared
+    # against numbers that describe the whole suite and reported as stale when they are correct.
+    #
+    # The `-m` expression is the key: "" for an unfiltered run, "not requires_db" for one marker
+    # filter, and the full expression for a compound one. Positional paths narrow the run in a way a
+    # marker key cannot express, so a narrowed run is recorded under its own key rather than
+    # pretending to be the suite.
+    # `session.config.args` is EMPTY when pytest runs as `python -m pytest`, which is why the first
+    # version recorded every run under the unfiltered key and they overwrote each other.
+    # `option.markexpr` is where pytest actually keeps the `-m` expression: read the PARSED option,
+    # not the command line.
+    config = getattr(session, "config", None)
+    raw_marker = getattr(getattr(config, "option", None), "markexpr", "") or ""
+    marker = " ".join(str(raw_marker).split())
+    args = [str(arg) for arg in getattr(config, "args", []) or []]
+    # `tests` is the suite ROOT, not a narrowing path: `pytest tests` and `pytest` measure the same
+    # thing. Only a path INSIDE the tree narrows the run.
+    positional = [arg for arg in args if not arg.startswith("-") and arg.rstrip("/\\") != "tests"]
+    invocation = marker if not positional else f"{marker} -- {','.join(sorted(positional))}"
+
+    payload_runs = {
+        invocation: {
+            "total": total,
+            "requires_db": requires_db,
+            "not_requires_db": total - requires_db,
+            "written_at": dt.datetime.now(tz=dt.UTC).isoformat(),
+            "by_marker": dict(sorted(by_marker.items())),
+        }
     }
 
     out = Path("out")
     out.mkdir(parents=True, exist_ok=True)
+    record_path = out / "collected_counts.json"
+    # MERGE. Each lane contributes its own entry; a filtered run must not erase the full-suite counts
+    # a previous run recorded, or the next `gates` would report them as never verified.
+    try:
+        existing = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    if isinstance(existing, dict) and isinstance(existing.get("runs"), dict):
+        merged = dict(existing["runs"])
+    else:
+        # A record in the OLD flat shape is a real full-suite measurement from an earlier round.
+        # Adopting it under the "" key keeps it usable instead of throwing away a true observation.
+        merged = {"": existing} if isinstance(existing, dict) and "total" in existing else {}
+    merged.update(payload_runs)
+    payload = {"runs": merged}
     (out / "collected_counts.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
     )
