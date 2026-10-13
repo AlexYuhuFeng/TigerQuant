@@ -1,0 +1,102 @@
+TigerQuant - final status at the end of the development run
+Generated: round 60 of 60
+
+This is the honest closing account. It exists because the run is ending, and a reader should be able to
+act on the state without reconstructing it from 82 commit messages.
+
+===========================================================================
+1. What is verified right now
+===========================================================================
+    pytest -q                       1367 passed   (1347 offline lane + 20 against real PostgreSQL)
+    mypy --strict                   clean, 103 source files
+    ruff check src tests tools      clean
+    tigerquant doctor               4/4 PASS
+    tigerquant gates                exit 0 -- 14/16 critical cases proven, 0 unproven
+    CI (GitHub Actions)             7/7 jobs green
+
+Run `python -m tigerquant gates` to reproduce the last four lines. Run
+`tools/push_via_api.py` to push; `tools/long_run_evidence.py` to regenerate CR-09's long-run evidence.
+
+===========================================================================
+2. CR status, and what each one actually rests on
+===========================================================================
+COMPLETE, with evidence and tests:  CR-00, CR-01, CR-02, CR-07, CR-08, CR-10
+SUBSTANTIALLY DELIVERED:           CR-05
+PARTIAL, BLOCKED ON THE OWNER:     CR-03, CR-04, CR-06
+PARTIAL, ONE ITEM REMAINING:       CR-09
+
+**THE THREE BLOCKED CRS ARE BLOCKED ON TWO DECISIONS, NOT ON WORK.**
+
+    CR-03  Tiger PAPER order integration        needs api.trade:write
+    CR-04  venue parity against a real session  needs the same grant
+    CR-06  a real provider call                 needs a rotated LLM key
+
+Neither is a coding task. `python tools/tiger_login.py --flow browser --enable-order-submission` issues
+the grant; `python -m tigerquant settings set llm.api_key` stores a key. **The key pasted into this
+project's chat transcript must be rotated first.**
+
+CR-09's remaining item is a supervised *trading* process, which needs a real feed or model -- so it
+reduces to the same two decisions.
+
+===========================================================================
+3. What this run actually produced
+===========================================================================
+**THE MOST CONSEQUENTIAL FINDING WAS NOT A FEATURE.** The project recorded "no remote CI runner" as a
+limitation. It had **32 completed runs, all failing**, triggered by its own pushes. Four defects were
+fixed to make CI green, and every one was a check that only agreed in ONE environment:
+
+  * `psycopg.*` missing from the mypy optional-import override list -- passed locally where the `db`
+    extra is installed, failed in CI which syncs only `--extra dev`;
+  * the collection-count hook recognised only how a developer TYPES the command;
+  * the record was READ BEFORE IT WAS WRITTEN (read at collection, written after);
+  * `--record-audit` asserted more than its own subject, making the step unrunnable where it was needed.
+
+Then **105 safety-critical tests were running in no CI lane** -- including `TigerAccountGuard`, the only
+thing keeping this project paper-only. Markers existed; nothing wore them. A database lane was added with
+a guard that FAILS on skips, because those tests skip when unreachable and a green job that verified
+nothing is the failure being fixed.
+
+**THE RECURRING SHAPE, found eight times: a list on one side of an interface disagreeing with a list on
+the other, with nothing comparing them.** Categories versus the staleness policy; `KNOWN_CATEGORIES`
+versus the policy; the parser versus the fixture; the marker declaration versus the CI selection;
+evidence written versus evidence cited; a sweep corpus that omitted `tools/`.
+
+**AND THE CHECKS NOW CATCH THE AUTHOR.** The orphan check failed CI on an evidence file written one
+round earlier by the same hand. That is the loop closing.
+
+===========================================================================
+4. What was built, by CR
+===========================================================================
+CR-05  evidence ingestion with per-category staleness, a filing connector, and an epistemic mapping
+       where a filing is OBSERVED and a wire story is an ATTRIBUTED_CLAIM. The mapping replaced a
+       hardcoded literal, and the staleness categories had been UNREACHABLE -- every fact silently took
+       the 60-second default because the pipeline emitted names the policy did not contain.
+CR-06  the LiteLLM binding tested offline: a missing key refuses BEFORE the network, `num_retries=0`,
+       and provider errors are REDACTED (proved by disabling the redaction and watching the test fail).
+CR-07  `ReasonCode.SUPERVISOR_STALLED` and a watchdog path that HALTS on a hung supervisor.
+CR-09  in-process hang detection (five verdicts; only `running` can hang), DETERMINISTIC backoff jitter,
+       and evidence-fact projection -- a schema table that had never been populated.
+       CR-09's long-run evidence is now REPRODUCIBLE: `tools/long_run_evidence.py` reproduces the
+       documented 32.50 hours, 8632 events, STABLE.
+
+===========================================================================
+5. Limitations that a reader should weigh
+===========================================================================
+1. **NO LIVE TRADING HAS EVER RUN.** `Mode.LIVE` refuses translation, `IMPLEMENTATION_STATUS` is
+   `SIMULATED`, and no order has reached a funded account. That is the intended state, not a gap.
+2. **THE CR-02 OAUTH GRANT RETURNS A LIVE-CAPABLE ACCOUNT.** The token is NOT paper-bound, so
+   `TigerAccountGuard` is the ONLY thing keeping this project paper-only. It is now exercised in CI.
+3. **Local verification is WEAK evidence here.** The DSH file policy is `workspace-write` and denies the
+   OS temp directory, so ~15 tests fail locally that pass in CI. Several defects this run were found by
+   CI and NONE locally.
+4. `pip-audit` reports `fsspec 2026.2.0 / CVE-2026-104851` (RCE via `ReferenceFileSystem`). It CANNOT be
+   fixed at the pinned engine version -- `nautilus_trader==1.231.0` pins it exactly and is the latest
+   release. Assessed UNREACHABLE (zero references to that class or protocol anywhere) and recorded as an
+   ACCEPTED RISK with a review condition, enforced by tests.
+5. `requires_llm` selects 0 tests in the fast lane but 14 in the extras lane; `requires_broker` runs on
+   ubuntu only.
+6. The `empty_or_unfilled` predicate was corrected to refuse `UNKNOWN`; **whether the parity path needs
+   this logic at all remains unestablished**, because nothing calls it.
+7. Five entries remain in `KNOWN_DEAD` with reasons. None is harmful; none is used.
+8. **This run is ending with three CRs partial because the owner's two decisions have not arrived.**
+   That is the accurate summary, and no amount of further offline work changes it.

@@ -18,6 +18,25 @@ Never mark a CR done based only on docs or mock demonstrations. If paper API per
 
 ---
 
+## Final status at the end of the development run
+
+**Read docs/evidence/final_status.txt first.** It is the honest closing account: what is verified, what
+each CR rests on, and the limitations a reader should weigh.
+
+**Three CRs are partial because TWO OWNER DECISIONS have not arrived, not because work remains:**
+
+    CR-03  Tiger PAPER order integration        needs api.trade:write
+    CR-04  venue parity against a real session  needs the same grant
+    CR-06  a real provider call                 needs a rotated LLM key
+
+    python tools/tiger_login.py --flow browser --enable-order-submission
+    python -m tigerquant settings set llm.api_key
+
+**The key pasted into this project chat transcript must be rotated before use.**
+
+Everything reachable without those two decisions has been built, tested and recorded. python -m
+tigerquant gates reports 14/16 critical cases proven, 0 unproven, and exits 0.
+
 ## Status (maintained by the agent)
 
 Last updated: 2026-10-10.
