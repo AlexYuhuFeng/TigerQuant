@@ -54,3 +54,6 @@ tmp*
 # pytest's tmp_path root, when a test's tmp dir resolves relative to the repo rather than
 # to the system temp directory. Test scratch files are never deliverables.
 pytest-of-*/
+
+# Litter from tests that fall back to CWD when the OS temp dir is denied.
+tq-wiring-*/
