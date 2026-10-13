@@ -27,6 +27,14 @@ from tigerquant.ops.gates import (
     verify_gates,
 )
 
+# These assertions describe the UNFILTERED suite. A lane with a -m filter deselects tests, so
+# the record it writes is SMALLER than the documented numbers and the check reports the documents
+# as stale when they are not -- found by running CI's fast lane locally. The honest position is
+# that this module cannot verify its claim from a filtered run, so it says so and is deselected
+# there rather than failing with a number that means something different.
+pytestmark = pytest.mark.requires_full_suite
+
+
 RAN_AUDIT = AuditRecord(recorded_at="2026-10-12T00:00:00+00:00")
 
 

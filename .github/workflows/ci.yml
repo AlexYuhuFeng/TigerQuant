@@ -68,7 +68,7 @@ jobs:
         # DESELECT what this lane cannot run BY DESIGN. Without the filter it tried to run tests whose
 # optional SDK the lane deliberately does not install, and reported 34 ModuleNotFoundError
 # failures that said nothing about the code. The `extras` job runs these with the extras present.
-        run: uv run --frozen pytest -q -m "not requires_db and not requires_broker and not requires_engine and not requires_llm" --cov=tigerquant --cov-report=term-missing
+        run: uv run --frozen pytest -q -m "not requires_db and not requires_broker and not requires_engine and not requires_llm and not requires_full_suite" --cov=tigerquant --cov-report=term-missing
 
       - name: Doctor self-check
         run: uv run --frozen python -m tigerquant doctor
