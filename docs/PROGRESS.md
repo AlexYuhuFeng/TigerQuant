@@ -1533,6 +1533,48 @@ only CI could settle whether the real `litellm.completion` does. It did: the ext
 at evidence that is not there is worse than one citing none, because it stops the reader looking while
 appearing to have shown them. That prompted the check below.
 
+### 2026-10-13 - CR-09: in-process hang detection, and the check that closes how it went wrong
+
+Full evidence: `docs/evidence/cr09_hang_detection.txt`. 41 tests.
+
+**The gap, in the module's own words.** `supervisor.py`'s docstring states the problem -- *"a single
+write at the end cannot distinguish 'working' from 'stuck in cycle 41'"* -- and **nothing implemented
+the distinction.** The heartbeat carried everything needed and no reader used it.
+
+**The signal, and why writing twice was the right design.** The heartbeat is written at the START of a
+cycle (`running`) and again at the END (`idle`/`backoff`). **So during a long cycle the phase stays
+`running` and `written_at` stops advancing.** That is the whole detector -- no second thread, no timeout
+wrapper. The original design was correct and worth stating as the reason this is cheap.
+
+**Only `running` can hang.** A long `backoff` is the mechanism WORKING; long `idle` is a supervisor
+between cycles. **A detector that cries wolf gets turned off** -- the same reasoning as PARTIAL gate
+cases and the accepted CVE.
+
+**Wired, not merely computed.** `supervise` reads the previous heartbeat BEFORE the first write
+overwrites it, and that moment is the only chance: **restarting a supervisor that HUNG is otherwise
+indistinguishable from restarting one that stopped cleanly.** Silent when there is no heartbeat, because
+a line printed every time is a line ignored.
+
+**THREE CI FAILURES IN A ROW, each an unenumerated case.** (1) A hand-built `Namespace` missing the new
+flag -- five tests failed, found by tests OTHER than the one written for the flag. (2) The fixture
+fixed, and **a real bug surfaced**. (3) **`heartbeat=None`** -- a supported configuration, and
+`read_heartbeat(None)` raised. **That one was the product.**
+
+**My own test had predicted (1) and did not prevent it.** It checked the PARSER; the failure was in a
+FIXTURE. **Naming a risk is not covering it.**
+
+So `test_fixture_mirrors_command.py` now compares the parser's surface against the fixture's in BOTH
+directions, with the **extractor tested itself** -- because a broken extractor makes both comparisons
+vacuous, which this project has hit three times. Proved: removing `hang_after` -> 1 failed (caught).
+
+**None of the three was caught locally.** The sandbox cannot create a temp directory, so the tests
+needing one do not run here. **A green local run is WEAK evidence**, and this round is the clearest
+demonstration of that so far.
+
+**Named limitations:** the 900s bound is judgement, not measurement; the detector reports on RESTART
+only, so nothing watches while the process runs; a hang is not escalated and nothing halts; and the
+fixture check covers one command, with the rest to be added by hand.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.

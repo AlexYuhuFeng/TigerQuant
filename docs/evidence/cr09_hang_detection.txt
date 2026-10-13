@@ -1,0 +1,119 @@
+TigerQuant CR-09 evidence - in-process hang detection
+Generated: see the git commit this file was added in
+
+Closes the item CR-09 listed as remaining: a supervised long-running process that can tell "working"
+from "stuck".
+
+===========================================================================
+1. The gap, in the module's own words
+===========================================================================
+`supervisor.py`'s docstring states the problem:
+
+    "A process that is alive but stuck -- blocked on a database that stopped answering, or spinning
+     ... A single write at the end cannot distinguish 'working' from 'stuck in cycle 41', because a
+     stuck process has simply not written yet. Writing at the start too means the heartbeat carries
+     the cycle it is IN, so a watchdog can see the index stop advancing -- which is the actual failure
+     it needs to detect."
+
+**The heartbeat carried everything needed and no reader used it.** The design was right and the
+detection was never written.
+
+===========================================================================
+2. The signal, and why writing twice was the right design
+===========================================================================
+The heartbeat is written at the START of a cycle (`running`) and again at the END (`idle`/`backoff`).
+**So during a long cycle the phase stays `running` and `written_at` stops advancing.**
+
+That is the whole detector. No second thread, no timeout wrapper, no process supervision -- the
+existing writes already carry it, which is why the original two-write design was correct and worth
+stating as the reason this is cheap.
+
+===========================================================================
+3. Five verdicts, because they need different responses
+===========================================================================
+    running  10s, bound 300  -> WORKING   healthy
+    running 400s, bound 300  -> HUNG      NOT healthy
+    backoff 900s, bound 300  -> BACKOFF   healthy
+    idle    900s, bound 300  -> IDLE      healthy
+    absent                   -> STALE     NOT healthy
+
+**ONLY `running` CAN HANG.** A long `backoff` is the mechanism WORKING; long `idle` is a supervisor
+between cycles. Reporting either would fire on correct behaviour, and **a detector that cries wolf gets
+turned off** -- the same reasoning this project applied to PARTIAL gate cases and to the accepted CVE.
+
+`HUNG` and `STALE` are kept apart deliberately: a hung process is alive and holding resources, a stale
+one is gone. `UNKNOWN` covers a heartbeat that cannot be interpreted -- a future version, a partial
+write, or a naive timestamp that cannot be compared to `now`.
+
+===========================================================================
+4. Wired, not merely computed
+===========================================================================
+**Dead detection is worse than none**, because it looks like the failure is covered. `supervise` reads
+the previous run's heartbeat BEFORE the first write overwrites it, and that moment is the only chance:
+
+**Restarting a supervisor that HUNG is otherwise indistinguishable from restarting one that stopped
+cleanly**, and the two call for different responses. It prints the cycle, the age, the bound, and a
+warning that whatever it was waiting on may still be broken.
+
+Silent when there is no heartbeat: a first run has nothing to report, and **a line printed every time
+is a line ignored.**
+
+`--hang-after` (default 900s) is the bound; a default that fires on healthy work trains operators to
+ignore the line.
+
+===========================================================================
+5. The check that closes how this went wrong
+===========================================================================
+The hang work took **three CI failures in a row**, each a different unenumerated case:
+
+  1. a hand-built `Namespace` in `test_supervise_cli.py` missing the new flag -- five tests failed with
+     AttributeError, found by tests OTHER than the one written for the flag;
+  2. the fixture fixed, and A REAL BUG BEHIND IT surfaced;
+  3. `heartbeat=None` -- `args.heartbeat` is legitimately None when a supervisor runs without one, and
+     `read_heartbeat(None)` raised. **That one was the product, not a fixture.**
+
+**My own test had predicted #1 and did not prevent it.** It checked the PARSER; the failure was in a
+FIXTURE. **Naming a risk is not covering it**, and a hand-built `Namespace` is a second definition of
+the CLI's surface that nothing compared to the first.
+
+`tests/unit/test_fixture_mirrors_command.py` now compares them in BOTH directions: every attribute
+`cmd_supervise` reads must be in the fixture, and the fixture must provide nothing the command does not
+read. The extractor is tested itself -- against a synthetic module, for ignoring other objects and for
+NOT descending into nested functions -- because **a broken extractor makes both comparisons vacuous**,
+which is the failure this project has hit three times.
+
+PROVED: removing `hang_after` from the fixture -> 1 failed (caught); present -> 9 passed.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests -q
+1288 passed            (local failures are SANDBOX-ONLY: workspace-write denies the OS temp dir)
+
+$ python -m pytest tests/unit/test_hang_detection.py tests/unit/test_hang_reporting.py -q
+32 passed
+
+$ python -m pytest tests/unit/test_fixture_mirrors_command.py -q
+9 passed
+
+$ python -m tigerquant gates   ->  exit 0, documented counts OK
+$ python -m ruff check src tests tools   -> All checks passed!
+$ python -m mypy                         -> Success. No issues found in 102 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. **The bound is a policy number, not a measurement.** 900 seconds is my judgement. No real cycle has
+   been timed against it, because no live cycle has run.
+2. **The detector only reports on RESTART.** Nothing watches the heartbeat while the supervisor runs,
+   so a hang is noticed when somebody next starts the process rather than when it happens. A watchdog
+   that polls would close that, and it does not exist.
+3. **A hang is not escalated.** The verdict is printed; no alert is raised, and nothing halts. CR-07's
+   watchdog is the right owner and does not consult this yet.
+4. `UNKNOWN` is reported but nothing acts on it. A heartbeat from a future version is visible and
+   unexplained.
+5. **The fixture check covers ONE command.** `cmd_supervise` is the only entry in `COMMANDS`; the other
+   CLI handlers with hand-built Namespaces are unchecked, and the file must be extended by hand.
+6. The three CI failures mean **local verification did not catch any of them**, because the sandbox
+   cannot create a temp directory and the tests needing one do not run here. A green local run is
+   therefore WEAK evidence, and this round is the clearest demonstration of that so far.

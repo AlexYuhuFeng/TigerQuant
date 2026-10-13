@@ -40,7 +40,7 @@ Last updated: 2026-10-10.
 
 | Command | Result |
 |---|---|
-| `pytest -q` (PostgreSQL running) | **1288 passed** |
+| `pytest -q` (PostgreSQL running) | **1297 passed** |
 | `pytest -q -m "not requires_db"` | **1268 passed**, 20 deselected |
 | `pytest -q -m requires_db` | **20 passed** against a real container |
 
