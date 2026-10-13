@@ -1,0 +1,86 @@
+TigerQuant - evidence-fact projection: attempted, reverted, and what it taught
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. What was attempted
+===========================================================================
+The gap measured in the previous round: `evidence_facts` is declared in the schema, both repositories
+implement writing and the point-in-time read, and **nothing in `src/` calls either**. The table is
+empty in any running system.
+
+A full implementation was written and then REVERTED. This file records why, so the next attempt starts
+from the friction rather than rediscovering it.
+
+===========================================================================
+2. What the design settled, and is worth keeping
+===========================================================================
+**WHAT THE EVENT CARRIES: the Fact's own JSON, not a hand-written field list.**
+
+The insert needs fifteen columns. Copying them into an event payload would create a SECOND definition
+of `Fact` that must be kept in step with the first by hand -- and this project has found that shape
+SIX times now, most recently in the fixture-versus-parser split that cost three CI rounds.
+
+`fact.model_dump(mode="json")` on the way out and `Fact.model_validate` in the projector means a field
+added to `Fact` needs no change to the event, the registry, or the projector.
+
+**WHEN IT IS EMITTED: when the pipeline ADMITS a fact.** Rejected documents are not evidence and must
+not be projected -- putting one in the audit trail would let a decision appear to have relied on
+something it was never allowed to use. The anchor is `if self._store.add(fact): admitted += 1`, which
+is exactly "newly stored". A DUPLICATE is not re-emitted: it is already projected, and re-emitting
+would put a second journal entry against a fact that did not change.
+
+**THE EMITTER IS OPTIONAL** (`emitter: EventEmitter | None = None`), per ADR-0001 section 6. Every
+existing call site keeps its behaviour, and a pipeline with no journal is a legitimate configuration
+because ingestion and projection are separate concerns.
+
+===========================================================================
+3. Why it was reverted
+===========================================================================
+The production change was complete and clean -- `ruff` passed and `mypy --strict` passed on 103 source
+files. **The tests were not passing**, and I ran out of working budget while iterating on their
+harness.
+
+**SHIPPING UNVERIFIED PRODUCTION CODE IS WORSE THAN NOT SHIPPING IT.** The whole point of the previous
+round's finding was that a thing which LOOKS wired and is not is the most expensive kind of defect.
+Committing a projector branch whose tests were never green would have produced exactly that, with a
+commit message claiming it worked.
+
+The tree was reverted with `git checkout` and `git clean` and is byte-identical to the last CI-green
+commit.
+
+===========================================================================
+4. The concrete friction, so the next attempt is faster
+===========================================================================
+Every one of these was GUESSED WRONG first, which is what cost the budget:
+
+    EventEmitter(mode=, sink=, ids=IdFactory(namespace, clock), clock=, correlation_id=)
+        -- NOT `journal=`; the journal is the `sink`
+    MemoryJournal(mode)
+        -- takes a mode, it is not no-argument
+
+    journal.records
+        -- a PROPERTY returning JournalRecord objects, not a method
+        -- and the records WRAP the event, so `project()` needs the inner event extracted, not the
+           record itself. THIS is where the attempt stopped: `'JournalRecord' object has no attribute
+           'event_id'` means the record has to be unwrapped and I had not established how.
+
+    IdFactory namespace "projection-test" is REJECTED
+        -- it must be a short alphanumeric string; the hyphen raises CanonicalizationError
+
+    IngestionPipeline uses __slots__
+        -- `_emitter` had to be added, the same omission that has broken `EvidenceStore`,
+           `ReconnectingRepository` and `DriftMonitor._router` in earlier rounds.
+
+**AGENTS.md invariant 12 says not to guess SDK interfaces and to add compatibility tests.** These are
+first-party, not SDK, so the invariant did not bite -- but the cost was identical, and the lesson
+transfers: reading the four signatures above takes one command each and would have saved the round.
+
+===========================================================================
+5. What remains true
+===========================================================================
+`tests/unit/test_evidence_projection_gap.py` is restored and PASSING. It measures the gap in eight
+assertions and each failure message names its own deletion: **when evidence-fact projection is
+implemented, that file should be removed, not edited.**
+
+CR-09's "evidence-fact projection" remains OPEN. The design in section 2 is settled and is the reason
+this document exists rather than a bare "reverted".
