@@ -51,7 +51,12 @@ def transient(exc: BaseException) -> bool:
 
 class TestTheDelayMath:
     def test_it_is_exponential(self) -> None:
-        p = BackoffPolicy(initial_seconds=1.0, multiplier=2.0, max_seconds=100.0)
+        # jitter_fraction=0.0: THIS TEST IS ABOUT THE CURVE, not the jitter. Asserting an exact delay
+        # while jitter is on would either fail or have to accept a range, and a range stops it
+        # testing that the exponential is exponential.
+        p = BackoffPolicy(
+            initial_seconds=1.0, multiplier=2.0, max_seconds=100.0, jitter_fraction=0.0
+        )
         assert p.delay_for(1) == 1.0
         assert p.delay_for(2) == 2.0
         assert p.delay_for(3) == 4.0
@@ -59,11 +64,17 @@ class TestTheDelayMath:
     def test_it_is_capped(self) -> None:
         """Without a ceiling a long outage produces retries hours apart while the process still
         holds a heartbeat and looks healthy to everything watching it."""
-        p = BackoffPolicy(initial_seconds=1.0, multiplier=10.0, max_seconds=30.0)
+        # Curve test: jitter off, same reason as above.
+        p = BackoffPolicy(
+            initial_seconds=1.0, multiplier=10.0, max_seconds=30.0, jitter_fraction=0.0
+        )
         assert p.delay_for(5) == 30.0
 
     def test_a_multiplier_of_one_is_a_fixed_delay(self) -> None:
-        p = BackoffPolicy(initial_seconds=3.0, multiplier=1.0, max_seconds=30.0)
+        # Curve test: a multiplier of one must stay a FIXED delay, which jitter would obscure.
+        p = BackoffPolicy(
+            initial_seconds=3.0, multiplier=1.0, max_seconds=30.0, jitter_fraction=0.0
+        )
         assert p.delay_for(1) == p.delay_for(9) == 3.0
 
     def test_attempt_is_one_based(self) -> None:
@@ -201,3 +212,81 @@ def _always_down() -> bool:
 def _always_value_error() -> bool:
     msg = "a defect"
     raise ValueError(msg)
+
+
+class TestJitter:
+    """The jitter's own properties. Separate from the curve, because they are separate concerns.
+
+    Without jitter the delay is a pure function of the attempt number, so **every client that saw the
+    same outage retries at the SAME INSTANTS** -- a thundering herd against a service only just coming
+    back.
+    """
+
+    def test_it_is_on_by_default(self) -> None:
+        """An opt-in mitigation is one nobody enables, and the herd is the default failure."""
+        assert BackoffPolicy().jitter_fraction > 0
+
+    def test_it_spreads_the_delay(self) -> None:
+        plain = BackoffPolicy(jitter_fraction=0.0)
+        jittered = BackoffPolicy(jitter_seed="node-a")
+        assert jittered.delay_for(3) != plain.delay_for(3)
+
+    def test_two_nodes_do_not_retry_in_lockstep(self) -> None:
+        """THE point. Two supervisors with the same configuration must not retry together."""
+        a = BackoffPolicy(jitter_seed="node-a")
+        b = BackoffPolicy(jitter_seed="node-b")
+        assert any(a.delay_for(n) != b.delay_for(n) for n in range(1, 9))
+
+    def test_the_same_seed_replays_identically(self) -> None:
+        """**TigerQuant IS DETERMINISTIC.** The audit journal must replay, so the delays have to
+        reproduce -- which is why the jitter is DERIVED from a hash rather than drawn from `random`."""
+        a = BackoffPolicy(jitter_seed="node-a")
+        b = BackoffPolicy(jitter_seed="node-a")
+        assert [a.delay_for(n) for n in range(1, 12)] == [b.delay_for(n) for n in range(1, 12)]
+
+    def test_it_never_exceeds_the_base(self) -> None:
+        """DOWNWARD ONLY, so the ceiling keeps its meaning. Jittering upward would let a retry land
+        beyond `max_seconds`, and the ceiling exists because a long outage produces retries hours
+        apart while the process still looks healthy."""
+        plain = BackoffPolicy(jitter_fraction=0.0)
+        jittered = BackoffPolicy()
+        for n in range(1, 15):
+            assert jittered.delay_for(n) <= plain.delay_for(n) + 1e-9
+
+    def test_it_is_never_below_the_stated_fraction(self) -> None:
+        """A delay never less than half the intended one at the default, so the backoff keeps the
+        protective property it exists for."""
+        plain = BackoffPolicy(jitter_fraction=0.0)
+        jittered = BackoffPolicy(jitter_fraction=0.5)
+        for n in range(1, 15):
+            assert jittered.delay_for(n) >= plain.delay_for(n) * 0.5 - 1e-9
+
+    def test_zero_disables_it_completely(self) -> None:
+        plain = BackoffPolicy(jitter_fraction=0.0)
+        for n in range(1, 8):
+            assert plain.delay_for(n) == BackoffPolicy(
+                initial_seconds=1.0, multiplier=2.0, jitter_fraction=0.0
+            ).delay_for(n)
+
+    def test_a_full_fraction_may_reach_near_zero(self) -> None:
+        """At 1.0 the delay can approach zero. Legal, and worth pinning so the bound is understood
+        rather than discovered."""
+        jittered = BackoffPolicy(jitter_fraction=1.0)
+        assert all(jittered.delay_for(n) >= 0 for n in range(1, 10))
+
+    def test_it_still_rises_with_the_attempt(self) -> None:
+        """Jitter must not destroy the SHAPE. Loosely checked, because jitter makes it non-monotonic
+        at close attempts and the property that matters is the trend."""
+        jittered = BackoffPolicy()
+        assert jittered.delay_for(6) > jittered.delay_for(1)
+
+    def test_it_respects_the_ceiling(self) -> None:
+        jittered = BackoffPolicy(initial_seconds=1.0, multiplier=2.0, max_seconds=30.0)
+        assert jittered.delay_for(50) <= 30.0
+
+    @pytest.mark.parametrize("fraction", [-0.01, 1.01, 2.0])
+    def test_a_fraction_outside_zero_to_one_is_refused(self, fraction: float) -> None:
+        """Above 1 a retry could land before the previous one; below 0 the delay would exceed the
+        ceiling. Both are refused rather than silently clamped."""
+        with pytest.raises(ValueError, match="jitter_fraction"):
+            BackoffPolicy(jitter_fraction=fraction)

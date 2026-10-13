@@ -28,6 +28,7 @@ would be most damaging and least visible.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field, replace
@@ -97,6 +98,23 @@ class BackoffPolicy:
     #: the incident it is supposed to report, and nobody ever notices it stopped working.
     max_attempts: int = 8
 
+    #: Fraction of the computed delay that may be shaved off to de-synchronise retries.
+    #:
+    #: WITHOUT THIS, EVERY CLIENT THAT SAW THE SAME OUTAGE RETRIES AT THE SAME INSTANTS, so a service
+    #: coming back is hit by all of them at once and falls over again. The delay is a pure function of
+    #: the attempt number, which is exactly what makes the herd synchronised.
+    #:
+    #: 0.5 by default: enough to spread a herd, while a delay is never less than half the intended
+    #: one, so the backoff keeps the protective property it exists for. Zero disables it.
+    jitter_fraction: float = 0.5
+
+    #: Distinguishes deployments so two of them do not jitter identically.
+    #:
+    #: NOT A SECURITY BOUNDARY and not a secret. It exists so that two supervisors started from the
+    #: same configuration at the same moment do not retry in lockstep -- if they shared a seed they
+    #: would be as synchronised as with no jitter at all.
+    jitter_seed: str = "tigerquant"
+
     def __post_init__(self) -> None:
         if self.initial_seconds <= 0:
             msg = "initial_seconds must be positive"
@@ -110,13 +128,27 @@ class BackoffPolicy:
         if self.max_attempts < 1:
             msg = "max_attempts must be at least 1"
             raise ValueError(msg)
+        if not 0.0 <= self.jitter_fraction <= 1.0:
+            msg = (
+                "jitter_fraction must be between 0 and 1. A fraction above 1 would let a retry land "
+                "BEFORE the previous one, and below 0 would make the delay longer than the ceiling."
+            )
+            raise ValueError(msg)
 
     def delay_for(self, attempt: int) -> float:
         """Seconds to wait before retry number ``attempt`` (1-based)."""
         if attempt < 1:
             msg = "attempt is 1-based"
             raise ValueError(msg)
-        return min(self.initial_seconds * (self.multiplier ** (attempt - 1)), self.max_seconds)
+        base = min(self.initial_seconds * (self.multiplier ** (attempt - 1)), self.max_seconds)
+        if self.jitter_fraction == 0.0:
+            return base
+        # DERIVED, not random. `hashlib` rather than `random`, because a replay must reproduce the
+        # delays it originally waited -- and a nondeterministic delay would make this path untestable.
+        digest = hashlib.sha256(f"{self.jitter_seed}:{attempt}".encode()).digest()
+        unit = int.from_bytes(digest[:8], "big") / float(1 << 64)  # [0, 1)
+        # DOWNWARD ONLY, so a delay never exceeds the base and the ceiling keeps its meaning.
+        return base * (1.0 - self.jitter_fraction * unit)
 
 
 @dataclass(frozen=True, slots=True)
