@@ -56,4 +56,6 @@ tmp*
 pytest-of-*/
 
 # Litter from tests that fall back to CWD when the OS temp dir is denied.
+# Both families come from suites that fall back to CWD when the OS temp dir is denied.
 tq-wiring-*/
+tq-recur-*/
