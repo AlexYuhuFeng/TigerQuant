@@ -60,8 +60,18 @@ class TestTheCountsMatch:
         report = verify_gates()
         assert report.ok, report.render()
 
-    @pytest.mark.parametrize("count", check_documented_counts(), ids=lambda c: c.label[:24])
-    def test_each_documented_count_individually(self, count: DocumentedCount) -> None:
+    @pytest.mark.parametrize("label", [label for label, _ in _DOCUMENTED_COMMANDS])
+    def test_each_documented_count_individually(self, label: str) -> None:
+        # READ INSIDE THE TEST, not in the parametrize decorator.
+        #
+        # The decorator is evaluated at COLLECTION, while the conftest hook writes the record at
+        # pytest_collection_finish -- AFTER collection. So a parametrized value captured the record
+        # as it was BEFORE this run, which is empty on a fresh checkout. Locally a previous run left
+        # one behind and hid this; in CI there is never a previous run, so every count read -1 and
+        # the suite could not pass there at all.
+        #
+        # A test that depends on state produced by its own run must read it when it RUNS.
+        count = next(item for item in check_documented_counts() if item.label == label)
         assert count.matches, count.describe()
 
 
