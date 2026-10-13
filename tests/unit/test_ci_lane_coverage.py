@@ -76,8 +76,15 @@ def expressions_in(body: str) -> list[str]:
     if "pytest" not in code:
         return []
     return [
-        match.group(1) or match.group(2) or ""
-        for match in re.finditer(r"""-m\s+(?:"([^"]*)"|'([^']*)')""", code)
+        match.group(1) or match.group(2) or match.group(3) or ""
+        for match in re.finditer(
+            # THREE SPELLINGS, and the third was missing. A quoted expression, a single-quoted one,
+            # and a BARE one: `-m requires_db` needs no quotes, and the database lane used exactly
+            # that. The parser silently reported no selection for it -- found by a test asserting the
+            # new lane selects the marker, which is why parser tests exist.
+            r"""-m\s+(?:"([^"]*)"|'([^']*)'|([A-Za-z_][\w.]*(?:\s+(?:and|or|not)\s+[A-Za-z_][\w.]*)*))""",
+            code,
+        )
     ]
 
 
@@ -182,12 +189,22 @@ class TestEveryMarkerIsSelected:
         )
 
     def test_a_negated_marker_is_not_counted_as_selected(self) -> None:
-        """The property that makes the check above necessary, asserted directly so the two cannot
-        drift into agreeing by accident."""
+        """THE property that makes the broker check meaningful, asserted on the PARSER rather than on
+                the current workflow.
+
+                The previous version asserted
+        equires_db was absent from selected_markers(). That held
+                only while
+        equires_db appeared exclusively as a DESELECTION -- and stopped holding the
+                moment a database lane was added that selects it positively, which is the desired state. **A
+                test written against the current workflow rather than against the property.** Asserting the
+                parser directly says what was meant and survives the workflow changing.
+        """
         assert _positively_selected("not requires_db and not requires_broker") == set()
-        assert "requires_db" not in selected_markers(), (
-            "requires_db is deselected everywhere and must not appear as SELECTED; if it does, the "
-            "negation handling has regressed and the broker check is vacuous again"
+        assert _positively_selected("requires_db") == {"requires_db"}
+        assert _positively_selected("not requires_db and requires_engine") == {"requires_engine"}
+        assert "requires_broker" in selected_markers(), (
+            "the broker lane must select its marker; if this fails the guard is unverified again"
         )
 
 
@@ -224,4 +241,65 @@ class TestNoStepPassesWhenItChecksNothing:
         declared = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         assert f'"{marker}:' in declared, (
             f"{marker} is selected in CI but not declared in pyproject"
+        )
+
+
+class TestTheDatabaseLane:
+    """`requires_db` DESELECTED in the fast lane with nothing starting a server, so its 20 tests ran
+    in no CI lane -- the same gap `requires_broker` had. This asserts the lane exists.
+
+    **THE SKIP GUARD IS THE PART THAT MATTERS.** These tests SKIP when no server is reachable, so a
+    job whose service failed to start would report `20 skipped`, exit 0, and look green while
+    verifying nothing. A skipped test is never a pass (ADR-0013 section 4).
+    """
+
+    def test_there_is_a_database_job(self) -> None:
+        assert "database" in workflow()["jobs"], (
+            "requires_db is deselected in the fast lane and no lane runs it, so its 20 tests are "
+            "covered by nothing in CI"
+        )
+
+    def test_it_starts_postgresql(self) -> None:
+        services = workflow()["jobs"]["database"].get("services") or {}
+        assert "postgres" in services, "the database job starts no PostgreSQL service"
+        assert "postgres:" in str(services["postgres"]["image"])
+
+    def test_it_waits_for_the_service_to_be_healthy(self) -> None:
+        """A service that is still starting produces SKIPS, which the guard below would then trip --
+        but a health check makes the failure say why."""
+        options = str(workflow()["jobs"]["database"]["services"]["postgres"].get("options", ""))
+        assert "pg_isready" in options
+        assert "--health-retries" in options
+
+    def test_it_applies_the_migrations(self) -> None:
+        runs = " ".join(
+            str(step.get("run", "")) for step in workflow()["jobs"]["database"]["steps"]
+        )
+        assert "db_migrate.py" in runs, "the database job never applies the schema"
+
+    def test_it_points_the_tests_at_the_service(self) -> None:
+        env = workflow()["jobs"]["database"].get("env") or {}
+        assert "TIGERQUANT_TEST_DSN" in env, (
+            "the tests resolve their DSN from TIGERQUANT_TEST_DSN first and would fall back to a "
+            "loopback development DSN"
+        )
+
+    def test_it_fails_when_tests_are_skipped(self) -> None:
+        """THE check. Without this the job passes while verifying nothing."""
+        step = next(
+            s
+            for s in workflow()["jobs"]["database"]["steps"]
+            if s.get("name") == "Tests that need PostgreSQL"
+        )
+        run = step["run"]
+        assert "skipped" in run, (
+            "the database job does not check for skipped tests. A service that failed to start makes "
+            "every requires_db test SKIP, and the job would exit 0 having verified nothing."
+        )
+        assert "exit 1" in run, "the skip check does not fail the step"
+
+    def test_the_database_lane_selects_the_marker(self) -> None:
+        selected = selected_markers()
+        assert "requires_db" in selected, (
+            "requires_db is not selected anywhere, so the database job would collect nothing"
         )

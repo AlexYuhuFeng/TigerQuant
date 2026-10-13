@@ -78,6 +78,56 @@ jobs:
           uv run --frozen python -m tigerquant replay --fixture tests/fixtures/scenarios/trend_up.yaml --journal "${{ runner.temp }}/audit.jsonl" --quiet
           uv run --frozen python -m tigerquant verify-journal "${{ runner.temp }}/audit.jsonl"
 
+  database:
+    name: tests against PostgreSQL
+    runs-on: ubuntu-latest
+    # 20 tests wear `requires_db`. They were DESELECTED in the fast lane and NOTHING started a server,
+    # so they ran in no CI lane at all -- the same gap `requires_broker` had.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: tq_backtest
+          POSTGRES_PASSWORD: tq_local_development_only
+          POSTGRES_DB: tq_backtest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The tests read this first and fall back to the loopback development DSN.
+      TIGERQUANT_TEST_DSN: postgresql://tq_backtest:tq_local_development_only@127.0.0.1:5432/tq_backtest
+      TIGERQUANT_DB_DSN: postgresql://tq_backtest:tq_local_development_only@127.0.0.1:5432/tq_backtest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync with the database extra
+        run: uv sync --frozen --extra dev --extra db --python 3.12
+
+      - name: Apply migrations
+        # The schema is not assumed; every mode is migrated by the same code path.
+        run: uv run --frozen --no-sync python tools/db_migrate.py --mode backtest
+
+      - name: Tests that need PostgreSQL
+        # THE SKIP GUARD IS THE POINT. These tests SKIP when no server is reachable, so a service that
+        # failed to start would make this step report `20 skipped` and EXIT 0 -- a green job that
+        # verified nothing. A skipped test is never a pass (ADR-0013 section 4), and this step refuses
+        # to be green on one.
+        run: |
+          uv run --frozen --no-sync pytest -q -m requires_db --no-header 2>&1 | tee /tmp/db_tests.txt
+          if grep -qE "[0-9]+ skipped" /tmp/db_tests.txt; then
+            echo "::error::requires_db tests were SKIPPED -- the database was unreachable, so this job verified nothing"
+            exit 1
+          fi
+
   extras:
     name: optional extras resolve and import
     runs-on: ubuntu-latest
