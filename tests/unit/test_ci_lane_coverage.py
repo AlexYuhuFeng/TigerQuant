@@ -168,9 +168,26 @@ class TestEveryMarkerIsSelected:
 
     def test_the_service_markers_are_accounted_for(self) -> None:
         """`requires_db` needs PostgreSQL, so a lane DESELECTS it rather than running it. Asserted so
-        the omission is a decision rather than an oversight like the broker one."""
-        assert "requires_db" in selected_markers(), (
-            "requires_db is neither run nor deselected anywhere"
+        the omission is a DECISION rather than an oversight like the broker one.
+
+        Checked against the raw expressions, NOT the positively-selected set: `requires_db` appears
+        only as `not requires_db`, and the negation-aware parser correctly excludes it from that set.
+        Asserting it there -- which the first version did -- asks the wrong question and passes or
+        fails for the wrong reason.
+        """
+        expressions = marker_expressions()
+        assert any("requires_db" in expression for expression in expressions), (
+            "requires_db is neither run nor deselected in any lane, so its 20 tests are accounted "
+            "for by nothing"
+        )
+
+    def test_a_negated_marker_is_not_counted_as_selected(self) -> None:
+        """The property that makes the check above necessary, asserted directly so the two cannot
+        drift into agreeing by accident."""
+        assert _positively_selected("not requires_db and not requires_broker") == set()
+        assert "requires_db" not in selected_markers(), (
+            "requires_db is deselected everywhere and must not appear as SELECTED; if it does, the "
+            "negation handling has regressed and the broker check is vacuous again"
         )
 
 
