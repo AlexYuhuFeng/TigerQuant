@@ -85,8 +85,13 @@ def build_cycle(
     return cycle, monitor
 
 
-def _report_previous_run(heartbeat: Path, *, hang_after: float) -> None:
+def _report_previous_run(heartbeat: Path | None, *, hang_after: float) -> None:
     """Say how the last run ended, from the heartbeat it left behind.
+
+    **`heartbeat` is None when the supervisor runs without one**, which is a supported configuration
+    and the default in the CLI's own tests. The first version called `read_heartbeat(None)` and raised
+    AttributeError on a real code path -- found by CI, because every test of this function passed a
+    Path. A contract with a case nobody enumerated is a contract with a case nobody tested.
 
     **Read BEFORE the first write overwrites it**, and that window is the only chance: restarting a
     supervisor that HUNG is otherwise indistinguishable from restarting one that stopped cleanly, and
@@ -95,6 +100,8 @@ def _report_previous_run(heartbeat: Path, *, hang_after: float) -> None:
     Silent when there is no heartbeat. A first run has nothing to report, and printing "no heartbeat"
     every time would train a reader to ignore the line that matters.
     """
+    if heartbeat is None:
+        return
     previous = read_heartbeat(heartbeat)
     if previous is None:
         return

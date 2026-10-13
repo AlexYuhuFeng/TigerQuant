@@ -128,3 +128,26 @@ class TestTheFlagIsWired:
     def test_the_flag_is_overridable(self) -> None:
         """A bound nobody can change is a bound that is wrong for somebody."""
         assert self._args("--hang-after", "60").hang_after == 60
+
+
+class TestNoHeartbeatPathAtAll:
+    """`heartbeat` is None when a supervisor runs without one -- a supported configuration, and the
+    default in the CLI's own tests.
+
+    The first version called `read_heartbeat(None)` and raised AttributeError on that path. **CI found
+    it because every test here passed a Path**, which is the same shape as the flag-versus-fixture
+    split: the contract had a case nobody enumerated.
+    """
+
+    def test_it_is_silent_with_no_path(self, capsys: pytest.CaptureFixture[str]) -> None:
+        _report_previous_run(None, hang_after=900.0)
+        assert capsys.readouterr().out == ""
+
+    def test_it_does_not_raise(self) -> None:
+        """Stated separately from the output, because "printed nothing" and "did not crash" are
+        different claims and the original bug was the second one."""
+        _report_previous_run(None, hang_after=900.0)
+
+    @pytest.mark.parametrize("bound", [0.0, 1.0, 900.0, 10**9])
+    def test_the_bound_does_not_matter_when_there_is_no_path(self, bound: float) -> None:
+        _report_previous_run(None, hang_after=bound)
