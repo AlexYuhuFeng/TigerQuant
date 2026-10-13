@@ -1,0 +1,116 @@
+TigerQuant - CI IS GREEN
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. The result
+===========================================================================
+    dependency audit and secret scan        -> success
+    optional extras resolve and import      -> success
+    fast (py3.12 on ubuntu-latest)          -> success
+    fast (py3.13 on ubuntu-latest)          -> success
+    fast (py3.14 on ubuntu-latest)          -> success
+    fast (py3.14 on windows-latest)         -> success
+
+**The first green CI run in this repository's history.** It follows 32+ consecutive failures that the
+project did not know about, because it recorded "no remote CI runner" as a limitation and never
+looked again.
+
+That single stale claim cost more than any defect in this log: every failure below was present for
+rounds, was reported by tooling that existed and ran on every push, and was invisible because a
+document said the tooling was not there.
+
+===========================================================================
+2. The four defects, in the order CI revealed them
+===========================================================================
+Each is the SAME SHAPE: a check that only agreed in one environment, written by a project that had
+been hunting exactly that shape for three rounds.
+
+**(a) The typecheck.** `psycopg.*` was missing from the mypy optional-import override list, while
+`tigeropen`, `nautilus_trader` and `litellm` were present. `mypy` passed LOCALLY, where the `db`
+extra is installed, and failed in CI, which syncs only `--extra dev`. Fixed by adding it, with a test
+that compares the extras against the override list in BOTH directions.
+
+**(b) The count hook recognised only how a developer types the command.** It required every argument
+to be `tests`, which held for `pytest tests -q` and was false for CI's `pytest -q --cov=...`. The
+distinction is POSITIONAL versus OPTION arguments:
+    local: pytest tests -q                    -> positional ['tests']             -> full
+    CI:    pytest -q --cov=tigerquant         -> positional []                    -> full
+    one:   pytest tests/unit/test_gates.py -q -> positional ['tests/unit/test...'] -> narrowed
+The first fix I wrote -- "no arguments at all means full suite" -- would have recognised only the CI
+spelling and broken the local one.
+
+**(c) The record was read before it was written.** The parametrize decorator captured the collection
+record at COLLECTION time, while the hook writes it at `pytest_collection_finish` -- after
+collection. Locally a previous run left a record behind and hid this completely; in CI there is
+never a previous run, so every documented count read `actual -1`. **A test that depends on state
+produced by its own run must read it when it RUNS.**
+
+**(d) `--record-audit` asserted more than its own subject.** It returned the whole report's exit
+code, but at that point in the job the count record does not exist yet, so `gates` correctly reported
+stale counts and exited 1. **Asserting more than a flag's own subject is how a step becomes
+unrunnable in the environment that needs it.**
+
+===========================================================================
+3. The test/lane mismatch
+===========================================================================
+After (a)-(d), CI was down to 34 failures, ALL `ModuleNotFoundError` for `tigeropen` or
+`nautilus_trader`. The fast lane syncs only `--extra dev` and had NO marker filter, so it ran tests
+whose optional SDK it deliberately does not install.
+
+**The markers already existed** -- `requires_broker`, `requires_engine`, `requires_llm` -- and a job
+already ran `-m "requires_engine or requires_llm"`. Nothing wore them.
+
+Six files marked, with the SDK each reaches through the adapter it imports, and the fast lane now
+filters. **34 import failures -> 0.**
+
+**The marker had to be placed four times**, and every failure was a different kind of "the diff looks
+right":
+
+  1. inside the module docstring -- the line was present, ruff and mypy were clean, the file parsed,
+     and `pytest -m "not requires_broker"` still collected all 32 tests, because the marker was PROSE;
+  2. after the docstring but BEFORE `from __future__ import annotations` -- SyntaxError;
+  3. after `from __future__` but BEFORE `import pytest` -- NameError at collection;
+  4. after `import pytest` but before the remaining imports -- E402.
+
+**None was visible by reading the change.** All four were found by RUNNING something. The final
+placement is verified by the property that matters:
+
+    pytest -m "requires_broker"     -> 32 tests collected
+    pytest -m "not requires_broker" -> no tests collected (32 deselected)
+
+===========================================================================
+4. The last three failures, and an honest limitation
+===========================================================================
+With the markers in place, 3 failures remained, all the count check:
+
+    documented count [STALE] pytest -q: claims 1170, actual 1014
+    3 failed, 1011 passed, 156 deselected
+
+**Those numbers are correct and the check was wrong to call them stale.** The documented counts
+describe the UNFILTERED suite; the fast lane deselects 156 tests, so its record is smaller BY
+CONSTRUCTION. The check records WHAT was collected but not WHICH invocation collected it.
+
+The interim fix is honest rather than a loosening: the module declares it cannot verify its claim
+from a filtered run, and the lane deselects it.
+
+    requires_full_suite: asserts counts describing the UNFILTERED suite; cannot be checked under -m
+
+**The proper fix is NOT this one, and is named rather than implied:** the record should carry the
+invocation that produced it -- the marker expression and any positional paths -- and `gates` should
+compare a documented command only against a record from that same command. **A count is only
+meaningful alongside what was counted.** That is the next piece of work.
+
+===========================================================================
+5. Limitations
+===========================================================================
+1. **`requires_full_suite` means the documented counts are NOT verified in CI.** They are checked
+   locally and the lane says so, but a green CI run does not currently prove them.
+2. The `extras` job runs `-m "requires_engine or requires_llm"`, so `requires_broker` tests are
+   deselected in EVERY lane on CI. They run locally. That is a gap, not a passing check.
+3. Local verification remains PARTIAL: the DSH file policy is `workspace-write` and 15 alert-wiring
+   tests write to the OS temp dir, which is denied. They fail locally for a sandbox reason and pass
+   in CI -- the inverse of the situation this whole round was about.
+4. Two litter families (`tq-wiring-*`, `tq-recur-*`) are gitignored rather than fixed; the real fix
+   is for those tests to use pytest's `tmp_path`.
+5. The remaining stale-limitation candidates from earlier rounds are STILL not swept. Five were
+   tested; one was false and was hiding a red build on every push.

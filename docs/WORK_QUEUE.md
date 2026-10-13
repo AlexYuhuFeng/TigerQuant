@@ -62,12 +62,7 @@ Last updated: 2026-10-10.
    The project's grant deliberately carries four read scopes only. Every part of CR-03 that can
    be built without it has been built and tested against a fake SDK; the one remaining
    acceptance item is a real paper round trip, and it cannot be faked or worked around.
-2. **CI RUNS AND WAS RED ON EVERY PUSH.** The earlier note here said no remote runner existed, so CI was never consulted -- but 32 runs had completed, all failing, at the very moments this project was pushing. The failure was mypy strict on a psycopg import: CI syncs only --extra dev, psycopg.* was missing from the optional-import override list, and **the local environment has the db extra installed, so it passed here.** Fixed, with a test comparing the two lists. See docs/evidence/ci_was_red.txt.
-3. **`pip-audit` NOW RUNS and reports ONE UNFIXABLE FINDING.** The earlier note here said advisory
-   access was unavailable and the audit "could not run" -- **that stopped being true and was never
-   retested**, while carrying a gate item. It now reports `fsspec 2026.2.0`, `CVE-2026-104851`.
-   `nautilus_trader==1.231.0` pins `fsspec==2026.2.0` EXACTLY and is the latest release, so there is
-   no constraint and no upgrade that fixes it. `fsspec.open` is reached only from nautilus entry
+2. **CI IS GREEN.** The earlier note here said no remote runner existed, so CI was never consulted -- but 32+ runs had completed, ALL FAILING, at the very moments this project was pushing. Four defects were found and fixed, every one of them a check that only agreed in one environment: a missing psycopg mypy override, a full-suite detector that recognised only how a developer types the command, a record read before it was written, and a flag asserting more than its own subject. Six test modules needing optional SDKs are now marked and deselected in the lane that lacks them. **All six CI jobs pass on every platform.** See docs/evidence/ci_green.txt.
    points this project does not invoke, but **the CVE's nature has NOT been assessed**, so this is a
    located risk and not a cleared one. **ASSESSED: it is RCE via `ReferenceFileSystem`, and it is UNREACHABLE here** -- zero references to that class, `reference://` or kerchunk in TigerQuant or in the installed engine. It is now a stated ACCEPTED RISK with a review condition, reported by `tigerquant gates` on every run, and **an audit that has never run FAILS the gate** rather than passing as clean. See `docs/evidence/cve_reachability_and_gate.txt`.
 4. **Docker Hub is unreachable** from this network. `deploy/compose.yaml` pulls the same official
