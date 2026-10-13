@@ -1,0 +1,66 @@
+TigerQuant CR-09 evidence - deterministic backoff jitter
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. The failure
+===========================================================================
+`BackoffPolicy.delay_for` was a pure function of the attempt number, so **EVERY CLIENT THAT SAW THE
+SAME OUTAGE RETRIED AT THE SAME INSTANTS** -- a thundering herd against a service only just coming
+back, which is the moment it can least afford one. The existing docstring even gestures at the problem
+("retries to thin out rather than hammer a host that is already unwell") without addressing
+synchronisation.
+
+===========================================================================
+2. The constraint that makes this interesting
+===========================================================================
+**TIGERQUANT IS DETERMINISTIC.** The audit journal must replay identically, so `random` is unavailable
+-- and a nondeterministic delay would make this path untestable and a replay unreproducible.
+
+The jitter is therefore DERIVED from the attempt number and a configured seed through `hashlib`:
+
+    digest = sha256(f"{seed}:{attempt}"), unit = first 8 bytes / 2**64
+    delay  = base * (1 - jitter_fraction * unit)
+
+Same inputs, same delays, every time.
+
+===========================================================================
+3. Observed
+===========================================================================
+    attempt  base   node-a   node-b   same?
+          1   1.00   0.9004   0.9960   False
+          3   4.00   2.5393   3.3651   False
+          5  16.00  12.6653  15.4721   False
+    replay identical: True      never exceeds base: True
+
+===========================================================================
+4. Two decisions worth stating
+===========================================================================
+**JITTER GOES DOWNWARD ONLY**, so a delay never exceeds the computed base and the ceiling keeps its
+meaning. Jittering upward would let a retry land beyond `max_seconds`, and that ceiling exists precisely
+because "a long outage produces retries hours apart while the process still holds a connection and a
+heartbeat, which looks healthy to everything watching it".
+
+**ON BY DEFAULT** (`jitter_fraction=0.5`). An opt-in mitigation is one nobody enables, and the herd is
+the default failure. At 0.5 a delay is never less than half the intended one, so the backoff keeps the
+protective property it exists for. A fraction outside 0..1 is REFUSED rather than clamped: above 1 a
+retry could land before the previous one, below 0 the delay would exceed the ceiling.
+
+`jitter_seed` is NOT a secret and not a security boundary. It exists so two supervisors started from the
+same configuration at the same moment do not retry in lockstep.
+
+===========================================================================
+5. Three existing tests broke, and that was correct
+===========================================================================
+`test_it_is_exponential`, `test_it_is_capped` and `test_a_multiplier_of_one_is_a_fixed_delay` assert
+exact delays. **They test the CURVE, not the jitter**, so they now disable jitter explicitly with the
+reason stated. Rewriting them to accept a RANGE would have quietly removed the only check that the
+exponential is exponential.
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **Jitter de-synchronises clients that use DIFFERENT seeds, and nothing assigns seeds per
+   deployment.** Two supervisors configured identically still retry together. The mechanism works;
+   the PROVISIONING of seeds is what is missing.
+2. The default fraction is a judgement, not a measurement against a real outage.
+3. Nothing measures whether the herd actually spreads in production -- no live client exists.

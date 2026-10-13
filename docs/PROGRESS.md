@@ -1575,6 +1575,54 @@ demonstration of that so far.
 only, so nothing watches while the process runs; a hang is not escalated and nothing halts; and the
 fixture check covers one command, with the rest to be added by hand.
 
+### 2026-10-13 - Three rounds that shipped without a record, now recorded
+
+**THIS ENTRY EXISTS BECAUSE THE WORK IT DESCRIBES WAS NOT RECORDED.** Backoff jitter, the watchdog
+escalation and evidence-fact projection all shipped code, tests and green CI -- and **no evidence file
+and no PROGRESS entry.** The objective requires recording evidence for each CR, and a session spent
+hunting claims nothing verifies had produced three rounds of exactly that.
+
+Found by checking whether recent commits cited evidence: **only one of the last five did.** The check
+added alongside this now catches the reverse direction too -- an evidence file nobody cites.
+
+**Backoff jitter** (`docs/evidence/cr09_backoff_jitter.txt`). `delay_for` was a pure function of the
+attempt number, so **every client that saw the same outage retried at the same instants** -- a
+thundering herd against a service only just coming back. The jitter is DERIVED from a hash rather than
+drawn from `random`, because the journal must replay identically. **Downward only**, so the ceiling
+keeps its meaning. On by default, because an opt-in mitigation is one nobody enables.
+
+**Watchdog escalation** (`docs/evidence/cr07_supervisor_stall_escalation.txt`). A hung supervisor now
+reaches the halt path, not just the console. **The watchdog takes a VERDICT, not a path** -- it is a
+deterministic evaluator and reading a file is a side effect. `HUNG` is CRITICAL; `STALE` and `UNKNOWN`
+warn, because an absent heartbeat is a first run as easily as a fault. **`None` means NO CHECK WAS
+PERFORMED**, deliberately distinct from `STALE`.
+
+**Evidence-fact projection** (`docs/evidence/cr09_evidence_projection.txt`). `evidence_facts` was
+declared, both repositories implemented writing, and **nothing called either** -- a table that is never
+populated looks exactly like a table that works. The event carries the Fact's OWN JSON so the projector
+rebuilds with `model_validate`, rather than a hand-written field list that would be a second definition
+of `Fact`. **This was reverted once** (`docs/evidence/cr09_evidence_projection_attempt.txt`) after its
+tests would not go green, then completed once five interfaces were looked up instead of guessed.
+
+**The pattern worth naming:** the revert cost a round that one command per signature would have
+prevented, and the missing records cost three rounds of legibility that no test was watching.
+
+### Evidence index - files not cited by a round entry
+
+**THESE HAD NO PATH TO THEM FROM ANY DOCUMENT.** An evidence file nobody cites is indistinguishable
+from one that was never written, except that finding out costs the reader the effort. The
+`test_evidence_orphans.py` check now fails on any file in `docs/evidence/` that no document mentions,
+and this index is how these are mentioned.
+
+Most are records of work that was themselves superseded or reverted, kept because a reverted attempt is
+evidence too -- of what was tried and why it stopped.
+
+- `docs/evidence/ci_green.txt`
+- `docs/evidence/ci_status_after_fixes.txt`
+- `docs/evidence/count_invocation_keying.txt`
+- `docs/evidence/gate_counts_attempt_reverted.txt`
+- `docs/evidence/ops_shutdown_push_incident.txt`
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.

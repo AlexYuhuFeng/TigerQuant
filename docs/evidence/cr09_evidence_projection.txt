@@ -1,0 +1,79 @@
+TigerQuant CR-09 evidence - evidence facts reach the database
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. The gap
+===========================================================================
+`evidence_facts` was declared in `0001_initial.sql`. `PostgresRepository` and `InMemoryRepository` both
+implemented `add_fact` and `facts_as_of`, and `Repository` declared them. **NOTHING IN src/ CALLED
+EITHER.** The only callers were the tests.
+
+**A TABLE THAT IS NEVER POPULATED LOOKS EXACTLY LIKE A TABLE THAT WORKS**, and `facts_as_of` -- the
+query that answers "what did we know at that instant" -- had nothing to read. Two implementations, a
+Protocol, and no caller.
+
+===========================================================================
+2. What the event carries, and why
+===========================================================================
+**THE FACT'S OWN JSON, NOT A HAND-WRITTEN FIELD LIST.** The insert needs fifteen columns, and copying
+them into a payload would create a SECOND definition of `Fact` kept in step with the first by hand --
+a shape this project has found SIX times, most recently in the fixture-versus-parser split that cost
+three CI rounds.
+
+`fact.model_dump(mode="json")` out and `Fact.model_validate` back means a field added to `Fact` needs no
+change to the event, the registry, or the projector.
+
+===========================================================================
+3. When it is emitted
+===========================================================================
+When the pipeline ADMITS a fact, anchored on `if self._store.add(fact)`. **A REJECTED document is not
+evidence and must not be projected** -- putting one in the audit trail would let a decision appear to
+rely on something it was never allowed to use. A DUPLICATE is not re-emitted: it is already projected,
+and re-emitting would add a second journal entry against a fact that did not change.
+
+**THE EMITTER IS OPTIONAL** (`emitter: EventEmitter | None = None`), per ADR-0001 section 6. Every
+existing call site is unchanged, and a pipeline with no journal stays legitimate because ingestion and
+projection are separate concerns.
+
+`IngestionPipeline` uses `__slots__`, so `_emitter` had to be added -- **the same omission that has
+broken `EvidenceStore`, `ReconnectingRepository` and `DriftMonitor._router` in earlier rounds.**
+
+===========================================================================
+4. This was reverted once
+===========================================================================
+The first attempt was COMPLETE and CLEAN -- ruff passed, mypy --strict passed on 103 files -- and its
+TESTS never went green. It was reverted rather than shipped: committing a projector branch whose tests
+were never green would have produced exactly the defect this work exists to remove, with a commit
+message claiming it worked. `docs/evidence/cr09_evidence_projection_attempt.txt` records the friction.
+
+The interfaces that cost that round, each resolvable by ONE command:
+
+    JournalRecord fields -> ['seq', 'event', 'prev_hash', 'hash'], so `record.event` UNWRAPS it
+    MemoryJournal(mode)  -> not no-argument
+    EventEmitter(mode=, sink=, ids=IdFactory(ns, clock), clock=, correlation_id=)  -> `sink`, not `journal=`
+    IdFactory namespace  -> alphanumeric only; a hyphen raises CanonicalizationError
+    IngestionPipeline    -> __slots__
+
+**AGENTS.md invariant 12 says do not guess interfaces.** These are first-party so it did not literally
+bite -- but the cost was identical, and the revert cost a round that a lookup would have prevented.
+
+===========================================================================
+5. Tests
+===========================================================================
+9 tests, using the IN-MEMORY repository deliberately: it implements `add_fact` too, so the contract is
+provable without PostgreSQL and without the OS temp directory -- neither of which the local sandbox
+provides, so a test needing them would be verified only by CI.
+
+`test_evidence_projection_gap.py` is DELETED, as its own failure messages instructed: *"If
+evidence-fact projection was implemented, THIS FILE SHOULD BE DELETED rather than updated."*
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **No evidence fact has been projected against real PostgreSQL in CI.** The database lane runs
+   `requires_db`, and no test there exercises the evidence projection. The in-memory proof is real and
+   it is not the same as the SQL path.
+2. Nothing asserts the journal event and the evidence store agree beyond the fields checked.
+3. The event carries the WHOLE fact, including attributes, into the journal. Accepted because the fact
+   already exists canonically in the evidence store, and a projection carrying only an ID would have to
+   read that store to write a row -- the coupling the projector exists to avoid.
