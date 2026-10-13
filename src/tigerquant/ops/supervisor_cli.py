@@ -22,6 +22,7 @@ import datetime as dt
 import os
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,9 +33,12 @@ from tigerquant.db.reconnect import ReconnectingRepository
 from tigerquant.ops.alerts import AlertRouter
 from tigerquant.ops.supervisor import (
     BackoffPolicy,
+    HangVerdict,
     Supervisor,
     SupervisorConfig,
     SupervisorReport,
+    detect_hang,
+    read_heartbeat,
 )
 
 if TYPE_CHECKING:
@@ -81,6 +85,29 @@ def build_cycle(
     return cycle, monitor
 
 
+def _report_previous_run(heartbeat: Path, *, hang_after: float) -> None:
+    """Say how the last run ended, from the heartbeat it left behind.
+
+    **Read BEFORE the first write overwrites it**, and that window is the only chance: restarting a
+    supervisor that HUNG is otherwise indistinguishable from restarting one that stopped cleanly, and
+    the two call for different responses. A hang means whatever it was waiting on may still be broken.
+
+    Silent when there is no heartbeat. A first run has nothing to report, and printing "no heartbeat"
+    every time would train a reader to ignore the line that matters.
+    """
+    previous = read_heartbeat(heartbeat)
+    if previous is None:
+        return
+    verdict, reason = detect_hang(previous, now=datetime.now(tz=UTC), hang_after_seconds=hang_after)
+    marker = "OK" if verdict.is_healthy else "ATTENTION"
+    print(f"  previous run      [{marker}] {verdict.name}: {reason}")
+    if verdict is HangVerdict.HUNG:
+        print(
+            "                    The last cycle never finished. Whatever it was waiting on may "
+            "still be broken."
+        )
+
+
 def cmd_supervise(args: argparse.Namespace) -> int:
     """Build the loop, attach alerts, run it, and report what happened."""
     from tigerquant.ops.alert_cli import _severity, build_router
@@ -120,6 +147,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     print(f"  interval          {args.interval}s")
     print(f"  max failures      {args.max_failures} consecutive, then halt")
     print(f"  heartbeat         {args.heartbeat}")
+    _report_previous_run(args.heartbeat, hang_after=args.hang_after)
     print(f"  cycles            {'until stopped' if args.iterations is None else args.iterations}")
     print(
         f"  transient retry   {args.retry_attempts} attempt(s), backoff ceiling "
@@ -348,6 +376,17 @@ def supervise_parser(sub: object) -> None:
         help="the mode this journal belongs to",
     )
     supervise.add_argument("--interval", type=float, default=30.0, help="seconds between cycles")
+
+    supervise.add_argument(
+        "--hang-after",
+        type=float,
+        default=900.0,
+        metavar="SECONDS",
+        help=(
+            "how long a SINGLE cycle may run before a restart reports the previous run as hung. A "
+            "backoff or an idle interval is never a hang, however long it lasts. Default 900."
+        ),
+    )
     supervise.add_argument(
         "--iterations",
         type=int,

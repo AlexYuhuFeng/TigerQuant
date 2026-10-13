@@ -32,10 +32,12 @@ import json
 import time
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tigerquant.core.canonical import digest_of
+from tigerquant.core.clock import ensure_utc
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,10 +48,12 @@ __all__ = [
     "TRANSIENT_EXHAUSTED",
     "BackoffPolicy",
     "CycleOutcome",
+    "HangVerdict",
     "Supervisor",
     "SupervisorConfig",
     "SupervisorHalted",
     "SupervisorReport",
+    "detect_hang",
     "heartbeat_age_seconds",
     "read_heartbeat",
 ]
@@ -498,6 +502,90 @@ class Supervisor:
         if last_ok is not None:
             payload["last_cycle_ok"] = last_ok
         path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+#: What a heartbeat says about whether the process is MAKING PROGRESS.
+#:
+#: `HUNG` and `STALE` are different failures and need different responses: a hung process is alive and
+#: holding resources, a stale one is gone. Collapsing them would lose the distinction that matters to
+#: whoever has to respond at 3am.
+class HangVerdict(StrEnum):
+    """Whether the supervisor is progressing, and if not, how."""
+
+    #: Between cycles, heartbeat fresh. Normal.
+    IDLE = "IDLE"
+    #: Waiting out a backoff, heartbeat fresh. Normal -- and NOT a hang, however long it looks.
+    BACKOFF = "BACKOFF"
+    #: Inside a cycle and within the bound. Normal.
+    WORKING = "WORKING"
+    #: Inside a cycle for longer than the bound. ALIVE BUT NOT PROGRESSING.
+    HUNG = "HUNG"
+    #: No heartbeat, or one too old to be about now. The process is gone or unreachable.
+    STALE = "STALE"
+    #: A heartbeat exists but cannot be interpreted -- a future version, or a partial write.
+    UNKNOWN = "UNKNOWN"
+
+    @property
+    def is_healthy(self) -> bool:
+        """IDLE, BACKOFF and WORKING are all healthy. HUNG and STALE are not."""
+        return self in {HangVerdict.IDLE, HangVerdict.BACKOFF, HangVerdict.WORKING}
+
+
+#: Phases that CAN hang. Everything else is expected to wait.
+#:
+#: `backoff` deliberately excluded: it exists to wait, and a long backoff is the mechanism working. A
+#: detector that flagged it would fire on correct behaviour and would then be ignored.
+_HANGABLE_PHASES = frozenset({"running"})
+
+
+def detect_hang(
+    heartbeat: dict[str, Any] | None,
+    *,
+    now: dt.datetime,
+    hang_after_seconds: float,
+) -> tuple[HangVerdict, str]:
+    """Whether the heartbeat says the supervisor is progressing. Returns the verdict and why.
+
+    ``hang_after_seconds`` bounds how long a SINGLE CYCLE may run before it is called hung. It is not
+    a staleness bound: a process that is idle between cycles for longer than this is IDLE, not hung,
+    and a process in backoff is BACKOFF.
+
+    Returns a reason in every case, because "HUNG" alone does not tell a responder whether to restart
+    the process or look at what it was waiting on.
+    """
+    if heartbeat is None:
+        return HangVerdict.STALE, "no heartbeat: the process is gone or has never run"
+
+    phase = str(heartbeat.get("phase", ""))
+    written = heartbeat.get("written_at")
+    cycle = heartbeat.get("cycle", "?")
+
+    if not written:
+        return HangVerdict.UNKNOWN, "the heartbeat carries no written_at, so its age is unknown"
+    try:
+        written_at = dt.datetime.fromisoformat(str(written))
+    except ValueError:
+        return HangVerdict.UNKNOWN, f"written_at {written!r} is not a timestamp"
+    if written_at.tzinfo is None:
+        return HangVerdict.UNKNOWN, "written_at has no timezone, so it cannot be compared to now"
+
+    age = (ensure_utc(now) - ensure_utc(written_at)).total_seconds()
+
+    if phase in _HANGABLE_PHASES:
+        if age > hang_after_seconds:
+            return (
+                HangVerdict.HUNG,
+                f"cycle {cycle} has been {phase} for {age:.0f}s, over the {hang_after_seconds:.0f}s "
+                "bound. It is alive and not progressing -- blocked on something, or spinning.",
+            )
+        return HangVerdict.WORKING, f"cycle {cycle} is {phase}, {age:.0f}s in"
+
+    if phase == "backoff":
+        # Deliberately not a hang. Waiting is what backoff IS.
+        return HangVerdict.BACKOFF, f"waiting out a backoff, last written {age:.0f}s ago"
+    if phase == "idle":
+        return HangVerdict.IDLE, f"between cycles, last written {age:.0f}s ago"
+    return HangVerdict.UNKNOWN, f"unrecognised phase {phase!r}"
 
 
 def read_heartbeat(path: Path) -> dict[str, Any] | None:
