@@ -1,0 +1,107 @@
+TigerQuant CR-06 evidence - the LiteLLM binding, and the marker that was worn by nothing
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. The gap
+===========================================================================
+`requires_llm` was **declared in pyproject, selected by a CI lane, and worn by no test at all.** The
+only references to it anywhere were inside the check that verifies markers are selected.
+
+The `llm` extra was installed in the extras lane and the only thing verified about it was an
+IMPORT-COMPATIBILITY check:
+
+    importlib.import_module("litellm"); hasattr(litellm, "completion")
+
+That says the package is present. **It says nothing about the adapter that talks to a provider** --
+the code that builds a request, bounds it, handles failure and normalises the response.
+
+===========================================================================
+2. What the tests cover
+===========================================================================
+14 tests, all OFFLINE. No API key, no network, no provider. They exercise `litellm_transport` with a
+monkeypatched `litellm.completion` and assert the properties the module's own docstring claims:
+
+**A MISSING KEY RAISES `ConfigurationError` BEFORE THE NETWORK.** The test asserts `not capture.called`
+as well as the exception type. Asserting only the exception would be satisfied by code that called the
+provider first and rejected the answer -- which is the opposite of the property.
+
+**THE MESSAGE SAYS THE KEY IS NEVER READ FROM A FILE.** That is the property keeping a credential out
+of this repository, and it is stated in a message a human reads when configuring a deployment.
+
+**`num_retries=0` IS PASSED.** Deliberate: a retry makes latency unbounded and hides an outage behind
+a slower failure, and a decision that arrives after the market moved is worse than no decision.
+
+**THE TIMEOUT AND TOKEN BUDGET ARE PASSED THROUGH**, so a caller cannot silently get the vendor's
+defaults.
+
+**A PROVIDER ERROR IS REDACTED.** A provider message can echo the request, and the request can carry
+a URL with a token in it.
+
+**THE RESPONSE IS NORMALISED TO A PLAIN MAPPING**, including from a vendor object that only exposes
+`model_dump()`, so the decision layer never sees a vendor type.
+
+===========================================================================
+3. The redaction test is PROVED, not asserted
+===========================================================================
+    with redact    -> 14 passed
+    without redact ->  1 failed, 13 passed   (caught)
+
+The test injects a credential-shaped string into a simulated provider error and asserts it does not
+appear in the raised message. Disabling the module's `redact` call makes it fail, so the test is
+measuring the redaction rather than the absence of an error.
+
+===========================================================================
+4. How this was verified locally, and the LIMIT of that
+===========================================================================
+`uv sync --frozen --extra llm` FAILS on this machine:
+
+    error sending request for url
+    client error (Connect)
+
+A NETWORK failure, not a dependency conflict. **litellm exists only in CI.**
+
+That is not a reason to push tests nobody has executed, so the suite was run against a MINIMAL STUB on
+`sys.path`. `litellm_transport` imports litellm INSIDE the function, so a stub exercises every branch
+asserted here. The stub was removed afterwards and is not part of the deliverable.
+
+**What the stub CANNOT verify: that the real `litellm.completion` accepts these keyword arguments.**
+A stub accepts anything. Only the extras lane can settle that, and it did -- the lane PASSED with
+these 14 tests on the run after this commit.
+
+===========================================================================
+5. A broken reference in the commit that added this work
+===========================================================================
+The commit message pointed readers at this file before it existed. **A commit that cites evidence
+which is not there is worse than one that cites none**, because it stops the reader looking while
+appearing to have shown them. Found by listing the evidence paths named in the last five commits and
+checking each one. No check does that, and nothing did.
+
+===========================================================================
+6. Test results
+===========================================================================
+$ python -m pytest tests/unit/test_llm_transport_contract.py -q
+14 passed            (credentials in CI; 1 skipped locally, where litellm cannot be installed)
+
+$ python -m tigerquant gates
+documented count [OK] pytest -q: claims 1214, actual 1214
+documented count [OK] pytest -q -m "not requires_db": claims 1194, actual 1194
+documented count [OK] pytest -q -m requires_db: claims 20, actual 20
+exit 0
+
+$ python -m ruff check src tests tools   -> All checks passed!
+$ python -m mypy                         -> Success. No issues found in 102 source files
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. **NO REAL PROVIDER CALL HAS BEEN MADE.** These tests verify the adapter's contract against a
+   monkeypatched transport. Whether DeepSeek returns what the decision layer expects is untested, and
+   CR-06's status remains `SIMULATED`. That needs an API key, and the one pasted into this project's
+   transcript must be rotated first.
+2. The tests assert keyword arguments are PASSED. They cannot assert the vendor honours them.
+3. `requires_llm` now skips locally, because litellm cannot be installed here. A skipped test is
+   never a pass, and the local count is therefore one lower than CI's.
+4. The redaction test uses a credential-SHAPED string, not a real one. A redactor that special-cased
+   the exact prefix would pass it; the security value rests on the pattern being representative.
+5. Nothing asserts that `litellm_transport` is the ONLY path to a provider. A future module could call
+   litellm directly and bypass the redaction and the bounded retry.

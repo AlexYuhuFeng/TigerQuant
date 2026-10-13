@@ -1501,6 +1501,38 @@ populated" from "selected and empty". The extras lane is ubuntu-latest only. And
 runs in no CI lane -- deselected in the fast lane, with nothing starting a PostgreSQL service, so 20
 tests are covered only locally.
 
+### 2026-10-13 - CR-06: the LiteLLM binding, and a marker that was worn by nothing
+
+Full evidence: `docs/evidence/cr06_llm_transport_contract.txt`. 14 tests.
+
+**The gap.** `requires_llm` was **declared in pyproject, selected by a CI lane, and worn by no test at
+all.** The only thing verified about the `llm` extra was an import-compatibility check --
+`hasattr(litellm, "completion")` -- which says the package is present and **nothing about the adapter
+that talks to a provider.**
+
+**14 tests, all offline.** No key, no network, no provider. They assert the properties the module's
+own docstring *claims*:
+
+- **a missing key raises BEFORE the network** -- asserting `not capture.called` as well as the
+  exception, because "raised after calling out" satisfies the letter and defeats the point;
+- the message says **the key is never read from a file**, the property keeping credentials out of
+  this repository;
+- **`num_retries=0`** -- a retry makes latency unbounded and hides an outage behind a slower failure;
+- the timeout and token budget are passed through;
+- **a provider error is redacted** -- a provider message can echo a URL carrying a token;
+- the response is normalised to a plain mapping, so the decision layer never sees a vendor type.
+
+**The redaction test is PROVED**: disabling `redact` makes it fail (14 passed -> 1 failed).
+
+**Verified locally against a stub, and the limit of that is named.** `uv sync --extra llm` fails here
+with a network error, so litellm exists only in CI. The stub exercises every branch because the
+transport imports litellm *inside* the function -- but **a stub accepts any keyword arguments**, so
+only CI could settle whether the real `litellm.completion` does. It did: the extras lane passed.
+
+**And the commit that added this work cited this evidence file before it existed.** A commit pointing
+at evidence that is not there is worse than one citing none, because it stops the reader looking while
+appearing to have shown them. That prompted the check below.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
