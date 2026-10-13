@@ -1,0 +1,90 @@
+TigerQuant - CI status after the fixes: three defects fixed, one class remaining
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. Where CI stands
+===========================================================================
+CI now gets PAST the typecheck and PAST the audit-recording step on every platform. It fails at the
+test step on all four fast-lane jobs:
+
+    34 failed, 1116 passed, 20 skipped
+
+**Every one of the 34 is the same thing:**
+
+    ModuleNotFoundError: No module named 'tigeropen'
+    ModuleNotFoundError: No module named 'nautilus_trader'
+
+The fast lane runs `uv sync --frozen --extra dev`, deliberately WITHOUT the optional extras, and
+`tests/unit/test_tiger_execution.py`, `test_tiger_read.py`, `test_guard_write_scope.py` and
+`test_nautilus_engine.py` import them at module level.
+
+**This is a pre-existing test/lane mismatch, not a regression from this round's work.** Those tests
+have always required dependencies their lane does not install. It was invisible because the project
+believed CI did not exist.
+
+Note `20 skipped`: the `requires_db` marker already deselects correctly, so the mechanism for this
+exists and is proven -- it simply has not been applied to the other optional extras.
+
+===========================================================================
+2. What this round fixed, verified by CI
+===========================================================================
+**FIXED AND CONFIRMED BY CI: the typecheck.** `psycopg.*` was missing from the mypy optional-import
+override list. `mypy` passed locally (where the `db` extra is installed) and failed in CI (which
+syncs only `--extra dev`). All four fast-lane jobs now pass `Typecheck (strict)`.
+
+**FIXED AND CONFIRMED BY CI: the audit-recording step.** `gates --record-audit` returned the WHOLE
+report's exit code, and the count record does not exist at that point in the job, so it exited 1.
+It now exits on the audit's own status.
+
+**FIXED: the count ordering.** The parametrize decorator read the collection record at COLLECTION
+time, while the hook writes it at `pytest_collection_finish` -- after collection. On a fresh checkout
+that meant every documented count read `actual -1`. **The stale-count failures are gone from CI's
+output**, which is the evidence the fix holds.
+
+**FIXED: `gates` no longer reports the audit as never run when it has been recorded**, and an audit
+that has never run FAILS rather than passing as clean.
+
+===========================================================================
+3. What remains, precisely
+===========================================================================
+**Add `requires_broker` and `requires_engine` markers** to the tests that import `tigeropen` and
+`nautilus_trader`, and deselect them in the fast lane exactly as `requires_db` already is. The
+mechanism exists and works; it needs applying to two more extras.
+
+That is a bounded, mechanical piece of work. It is NOT done here, and CI is NOT green.
+
+===========================================================================
+4. The honest summary of this round
+===========================================================================
+The round began by sweeping the limitations recorded in earlier rounds. It found that
+**"No remote CI runner" was false** -- the repository had 32 completed runs, all failing, triggered
+by this project's own pushes.
+
+Fixing that surfaced **four defects in a row, three of them in code written specifically to catch
+this class of problem**:
+
+  1. `psycopg.*` missing from the mypy override list (the typecheck);
+  2. the count hook recognising only how a developer types the command;
+  3. the audit record unable to exist in a fresh clone;
+  4. `--record-audit` asserting more than its own subject.
+
+Each was a check that only agreed in ONE environment. The project has now found that shape five
+times in total, and the last four were found by CI -- which the project did not know existed.
+
+===========================================================================
+5. Limitations
+===========================================================================
+1. **CI is NOT green.** 34 tests fail for a known, bounded reason that is not yet fixed.
+2. The `out/` records are untracked, so CI must generate them; it does for the audit, and the count
+   record is written by the run itself. A future check that reads a record must account for this or
+   it will fail the same way (defect 3 above).
+3. Verification locally is now PARTIAL: the DSH file policy changed to `workspace-write` during this
+   round, and 15 alert-wiring tests write to the OS temp dir, which is now denied. They fail locally
+   for a sandbox reason and pass in CI. `TEMP` redirection into the workspace did not help, so the
+   local suite cannot currently be run to completion.
+4. That sandbox change also left **1130 untracked `tq-wiring-*/` directories** at the repository
+   root, which git cannot even read. They are ignored now; the real fix is for those tests to use
+   pytest's `tmp_path`.
+5. The remaining stale-limitation candidates from earlier rounds are STILL not fully swept. Four
+   were tested (CI, Docker Hub, pip-audit, mypy coverage); roughly forty remain, and this round is
+   direct evidence that they cannot be assumed to be design statements that never go stale.
