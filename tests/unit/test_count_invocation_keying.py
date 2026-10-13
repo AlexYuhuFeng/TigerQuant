@@ -31,6 +31,7 @@ from tigerquant.ops.gates import (
     GateReport,
     _recorded_invocations,
     check_documented_counts,
+    verify_gates,
 )
 
 
@@ -47,22 +48,90 @@ def write_document(tmp_path: Path, counts: dict[str, int]) -> None:
 
 
 class TestTheRecordIsKeyedByInvocation:
-    def test_a_run_without_a_filter_is_recorded_under_an_empty_key(self) -> None:
-        assert _recorded_invocations() != () or True  # shape check only
+    """CONTRACT tests, against a SYNTHETIC record.
 
-    def test_the_live_record_separates_the_documented_commands(self) -> None:
-        """The three commands the documents name must be distinguishable, or they overwrite."""
-        recorded = _recorded_invocations()
-        for marker in ("", "not requires_db", "requires_db"):
-            assert marker in recorded, (
-                f"{marker!r} is not in the record ({recorded}). Either that command has not been run "
-                "since the record was keyed by invocation, or the key is being collapsed -- which is "
-                "the defect that made a correct document read as stale."
-            )
+    The first version read the environment's record and demanded all three documented invocations be
+    present. That holds on a developer machine, where those commands have been run, and NEVER in CI,
+    whose fast lane runs one compound filter. **A test asserting a property of the local environment
+    is the exact defect this whole area is about, and five of them were written immediately after
+    documenting it.**
+    """
 
-    def test_each_documented_command_gets_its_own_count(self) -> None:
-        by_marker = {count.marker: count for count in check_documented_counts()}
-        assert by_marker[""].actual != by_marker["requires_db"].actual
+    def test_three_invocations_are_stored_separately(self, tmp_path: Path) -> None:
+        write_document(tmp_path, {"pytest -q": 1187})
+        write_record(
+            tmp_path,
+            {
+                "": {"total": 1187, "not_requires_db": 1167, "requires_db": 20},
+                "not requires_db": {"total": 1167, "not_requires_db": 1167, "requires_db": 0},
+                "requires_db": {"total": 20, "not_requires_db": 0, "requires_db": 20},
+            },
+        )
+        assert set(_recorded_invocations(root=tmp_path)) == {"", "not requires_db", "requires_db"}
+
+    def test_a_compound_filter_is_not_a_documented_command(self, tmp_path: Path) -> None:
+        """CI's lane. It must never be mistaken for the bare suite."""
+        write_document(tmp_path, {"pytest -q": 1187})
+        write_record(
+            tmp_path,
+            {
+                "not requires_db and not requires_broker": {
+                    "total": 1014,
+                    "not_requires_db": 1014,
+                    "requires_db": 0,
+                }
+            },
+        )
+        suite = next(c for c in check_documented_counts(root=tmp_path) if c.marker == "")
+        assert suite.unverified_reason
+        assert not suite.matches
+
+    def test_a_documented_count_compares_only_against_its_own_invocation(
+        self, tmp_path: Path
+    ) -> None:
+        """THE property. 1187 is right for the suite and wrong for the filtered lane, and the check
+        must not confuse them -- which is what it did before."""
+        write_document(tmp_path, {"pytest -q": 1187, 'pytest -q -m "not requires_db"': 1167})
+        write_record(
+            tmp_path,
+            {
+                "": {"total": 1187, "not_requires_db": 1167, "requires_db": 20},
+                "not requires_db": {"total": 1014, "not_requires_db": 1014, "requires_db": 0},
+            },
+        )
+        by_marker = {c.marker: c for c in check_documented_counts(root=tmp_path)}
+        assert by_marker[""].matches
+        assert not by_marker["not requires_db"].matches
+        assert "STALE" in by_marker["not requires_db"].describe()
+
+
+class TestTheLiveRecordIsReportedHonestly:
+    """ENVIRONMENT tests: structural, and true whatever commands have been run."""
+
+    def test_the_record_exists_and_is_keyed_by_invocation(self) -> None:
+        assert COLLECTED_COUNTS.is_file(), "the collection hook did not write its record"
+        record = json.loads(COLLECTED_COUNTS.read_text(encoding="utf-8"))
+        assert "runs" in record, (
+            "the record is back in the FLAT shape, which cannot distinguish a filtered run from the "
+            "suite; that is the defect this file exists to prevent"
+        )
+
+    def test_every_entry_carries_the_three_counts(self) -> None:
+        runs = json.loads(COLLECTED_COUNTS.read_text(encoding="utf-8")).get("runs", {})
+        assert runs, "the record has no runs"
+        for invocation, counts in runs.items():
+            for key in ("total", "not_requires_db", "requires_db"):
+                assert key in counts, f"{invocation!r} is missing {key!r}"
+
+    def test_gates_tells_the_truth_about_whatever_record_exists(self) -> None:
+        """Not 'the counts match' -- that depends on the environment -- but 'the report is accurate
+        about the record it has'."""
+        report = verify_gates()
+        for count in report.counts:
+            if count.unverified_reason:
+                assert "NOT VERIFIED" in count.describe()
+            else:
+                assert count.actual > 0, count.describe()
 
 
 class TestTheThreeStates:
