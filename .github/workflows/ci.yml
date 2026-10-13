@@ -122,9 +122,24 @@ jobs:
         # verified nothing. A skipped test is never a pass (ADR-0013 section 4), and this step refuses
         # to be green on one.
         run: |
+          set -euo pipefail
+          # Count what the MARKER selects, then require that many to have PASSED.
+          #
+          # The first version failed on ANY skip in the output. It misfired immediately: this lane
+          # collects every test module before `-m` filters, and
+          # tests/unit/test_llm_transport_contract.py skips at IMPORT because litellm is not
+          # installed here. The job reported "requires_db tests were SKIPPED" while the log plainly
+          # said `20 passed`.
+          #
+          # THE GUARD WAS TOO BROAD, NOT WRONG. A service that failed to start really would make all
+          # 20 SKIP, and that must still fail. Comparing PASSED against SELECTED says exactly that,
+          # and ignores a skip from a module this lane never runs.
+          selected=$(uv run --frozen --no-sync pytest -q -m requires_db --co --no-header | grep -oE "^[0-9]+(/[0-9]+)? tests? collected" | grep -oE "^[0-9]+")
           uv run --frozen --no-sync pytest -q -m requires_db --no-header 2>&1 | tee /tmp/db_tests.txt
-          if grep -qE "[0-9]+ skipped" /tmp/db_tests.txt; then
-            echo "::error::requires_db tests were SKIPPED -- the database was unreachable, so this job verified nothing"
+          passed=$(grep -oE "[0-9]+ passed" /tmp/db_tests.txt | grep -oE "^[0-9]+" | tail -1)
+          echo "selected=${selected} passed=${passed}"
+          if [ -z "${selected}" ] || [ -z "${passed}" ] || [ "${passed}" -lt "${selected}" ]; then
+            echo "::error::only ${passed:-0} of ${selected:-?} requires_db tests passed -- a skipped test is never a pass (ADR-0013 s4)"
             exit 1
           fi
 

@@ -284,19 +284,60 @@ class TestTheDatabaseLane:
             "loopback development DSN"
         )
 
-    def test_it_fails_when_tests_are_skipped(self) -> None:
-        """THE check. Without this the job passes while verifying nothing."""
+    def test_it_fails_when_the_selected_tests_do_not_all_pass(self) -> None:
+        """THE check. Without it the job passes while verifying nothing.
+
+        **THE FIRST VERSION WAS TOO BROAD AND MISFIRED IMMEDIATELY.** It failed on ANY skip in the
+        output, and this lane collects every module before `-m` filters -- so
+        `test_llm_transport_contract.py` skipping at IMPORT (litellm is not installed here) tripped a
+        guard whose own message said "requires_db tests were SKIPPED", while the log plainly said
+        `20 passed`.
+
+        The guard was too broad, NOT wrong: a service that failed to start really would make all 20
+        SKIP, and that must still fail. Comparing PASSED against SELECTED says exactly that and
+        ignores a skip from a module this lane never runs.
+        """
         step = next(
             s
             for s in workflow()["jobs"]["database"]["steps"]
             if s.get("name") == "Tests that need PostgreSQL"
         )
         run = step["run"]
-        assert "skipped" in run, (
-            "the database job does not check for skipped tests. A service that failed to start makes "
-            "every requires_db test SKIP, and the job would exit 0 having verified nothing."
+        assert "selected=" in run, "the guard does not count what the marker selects"
+        assert "passed=" in run, "the guard does not count what passed"
+        assert '"${passed}" -lt "${selected}"' in run, (
+            "the guard does not compare passed against selected, so it either misses a total skip or "
+            "fails on an unrelated one"
         )
-        assert "exit 1" in run, "the skip check does not fail the step"
+        assert "exit 1" in run, "the guard does not fail the step"
+
+    def test_the_selection_count_parser_matches_pytests_summary(self) -> None:
+        """`--co` prints `N/M tests collected`, and the first grep expected `N tests collected`.
+
+        It would have produced an EMPTY count, and an empty count fails the guard -- so this would
+        have shown up as a red job rather than a silent pass. Still worth pinning, because the
+        failure would have been reported as 'the database was unreachable'.
+        """
+        step = next(
+            s
+            for s in workflow()["jobs"]["database"]["steps"]
+            if s.get("name") == "Tests that need PostgreSQL"
+        )
+        assert "(/[0-9]+)?" in step["run"], (
+            "the selection grep does not tolerate pytest's `N/M tests collected` form"
+        )
+
+    def test_the_guard_does_not_fail_on_any_skip(self) -> None:
+        """The specific over-broad form, asserted absent so it cannot come back."""
+        step = next(
+            s
+            for s in workflow()["jobs"]["database"]["steps"]
+            if s.get("name") == "Tests that need PostgreSQL"
+        )
+        assert 'grep -qE "[0-9]+ skipped"' not in step["run"], (
+            "the guard fails on any skip in the output, including one from a module this lane never "
+            "runs. It misfired on exactly that."
+        )
 
     def test_the_database_lane_selects_the_marker(self) -> None:
         selected = selected_markers()
