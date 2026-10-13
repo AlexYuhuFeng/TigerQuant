@@ -287,6 +287,10 @@ class ReasonCode(StrEnum):
     UNRECONCILED = "UNRECONCILED"
     ILLEGAL_TRANSITION = "ILLEGAL_TRANSITION"
     # Ops
+    #: The supervised process is alive but not progressing. Distinct from a CRASH: a hung
+    #: process still holds resources and may still hold a broker connection, so it cannot be
+    #: treated as simply absent.
+    SUPERVISOR_STALLED = "SUPERVISOR_STALLED"
     CLOCK_SKEW = "CLOCK_SKEW"
     LEASE_HELD_BY_OTHER = "LEASE_HELD_BY_OTHER"
     DUPLICATE_EVENT = "DUPLICATE_EVENT"

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from tigerquant.core.clock import ensure_utc
 from tigerquant.core.enums import ReasonCode, Severity
+from tigerquant.ops.supervisor import HangVerdict
 from tigerquant.risk.state import Actor, RiskState
 
 if TYPE_CHECKING:
@@ -91,6 +92,7 @@ class Watchdog:
         account_reconciled: bool = True,
         clock_skew_seconds: Decimal | None = None,
         broker_reachable: bool = True,
+        supervisor_verdict: HangVerdict | None = None,
     ) -> tuple[WatchdogVerdict, ...]:
         """Evaluate every condition. Returns only the ones that fired.
 
@@ -156,6 +158,38 @@ class Watchdog:
                     detail=(
                         f"{blocking_intents} unresolved order intent(s); new exposure must "
                         "stay blocked until reconciliation completes"
+                    ),
+                )
+            )
+
+        # THE SUPERVISOR'S HANG VERDICT, judged here rather than detected here.
+        #
+        # The watchdog is a deterministic evaluator and reading a heartbeat file is a side effect, so
+        # the caller detects and passes the verdict. `None` means NO CHECK WAS PERFORMED, which is
+        # different from a verdict of STALE: not looking is not the same as looking and finding
+        # nothing, and collapsing them would let an unchecked system report as checked.
+        if supervisor_verdict is HangVerdict.HUNG:
+            verdicts.append(
+                WatchdogVerdict(
+                    code=ReasonCode.SUPERVISOR_STALLED,
+                    severity=Severity.CRITICAL,
+                    detail=(
+                        "the supervisor is alive but not progressing. It cannot reconcile, and "
+                        "unreconciled state blocks new exposure (ADR-0008). Treat as a STALL, not a "
+                        "crash: a hung process may still hold a broker connection."
+                    ),
+                )
+            )
+        elif supervisor_verdict in {HangVerdict.STALE, HangVerdict.UNKNOWN}:
+            # A WARNING, not a halt. An absent heartbeat is a first run as easily as a fault, and
+            # halting on it would stop a system that has done nothing wrong.
+            verdicts.append(
+                WatchdogVerdict(
+                    code=ReasonCode.SUPERVISOR_STALLED,
+                    severity=Severity.WARNING,
+                    detail=(
+                        f"supervisor liveness is {supervisor_verdict.name}: the heartbeat is absent, "
+                        "unreadable, or not interpretable. Not halting on this alone."
                     ),
                 )
             )
