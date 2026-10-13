@@ -1,0 +1,106 @@
+TigerQuant - a sweep for dead code, and what it found about the claim it was testing
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. Why this sweep exists
+===========================================================================
+Last round I wrote that offline work was "close to exhausted". **A claim nothing verifies is the exact
+failure this session has been about**, so it was tested rather than asserted.
+
+The method is the systematic version of a pattern found FOUR TIMES BY ACCIDENT: `evidence_facts` (a
+table nothing populated), `KNOWN_CATEGORIES` (a constant nothing consumed), the pipeline's category
+mapping (a policy nothing read), and `add_fact`/`facts_as_of` (methods nothing called). Each was a thing
+that LOOKED wired and was not -- the most expensive kind of defect, because it reads as covered.
+
+The sweep is one script. It scans `src/` for module-level public functions and classes and reports those
+whose name appears exactly once in their own file and nowhere in `src/` or `tests/`.
+
+    public definitions scanned:            400
+    referenced NOWHERE:                     43   <- mostly NOISE, see below
+    referenced ONLY BY TESTS:               62
+    TRULY DEAD (own file once, nothing):     8
+
+===========================================================================
+2. The first result was noise, and saying so matters
+===========================================================================
+**43 "unused" was mostly return-type dataclasses.** `IngestionReport` is the return type of `ingest()`
+and appears inside `connectors.py` -- so a cross-file reference count reports it as unused when it is
+central.
+
+Refining to "appears exactly once in its own file AND nowhere else" cut 43 to **8**. Reporting the 43
+would have been a finding-shaped number attached to nothing, which is worse than no sweep.
+
+===========================================================================
+3. The eight, and the one that matters
+===========================================================================
+    global_prefix            core/ids.py
+    coerce_decimal           decision/model.py
+    canonical_json           decision/prompt.py
+    default_schema_version   events/journal.py
+    price_attribute_names    evidence/facts.py
+    attribute_map            evidence/lineage.py
+    empty_or_unfilled        execution/parity.py
+    write_report             pipeline/long_run.py
+
+**`write_report` IS THE FINDING.** Its docstring reads:
+
+    "Persist a stability report as evidence."
+
+**Nothing calls it.** The same shape as `evidence_facts`: an evidence-persistence path that exists and
+is not wired. CR-09's long-run evidence was produced some other way, and the function built to produce
+it sits unused.
+
+**`empty_or_unfilled` is the second.** A predicate in `execution/parity.py` that nothing consults.
+Parity that does not check for unfilled orders may be MISSING A CASE rather than carrying dead code, so
+it is flagged for a look rather than a deletion.
+
+The other six are small helpers from earlier shapes. Each is listed WITH A REASON, because **an entry
+with no reason is a suppression**, and a suppression is how a known gap becomes an unknown one.
+
+===========================================================================
+4. The guard
+===========================================================================
+`tests/unit/test_no_dead_code.py` fails on any NEW public definition that nothing references, refuses a
+`KNOWN_DEAD` entry without a real reason, and -- in the other direction -- **fails when a listed entry
+stops being dead**, because a list that outlives its subject is a stale claim.
+
+===========================================================================
+5. The measurement changed what it measured
+===========================================================================
+**The test file broke its own sweep on the first run.** It names every entry in `KNOWN_DEAD`, so
+counting itself made each of them "referenced in tests" and the sweep reported NOTHING dead -- nine
+tests failed while the standalone script passed.
+
+That is why the corpus now EXCLUDES `test_no_dead_code.py` from its own scan.
+
+**An observer that changes the observed is indistinguishable from a working check that finds nothing**,
+which is the failure this project has hit repeatedly. It was caught only because the standalone script
+and the test disagreed about the same input.
+
+It also took **120 seconds**, because the scan ran once per parametrised test. `lru_cache` brought it to
+11s. A check slow enough to notice is a check somebody deletes.
+
+===========================================================================
+6. What this says about the claim
+===========================================================================
+**The claim held, with a caveat.** No large built-but-unused subsystem was found. But two of the eight
+are not housekeeping:
+
+- `write_report` is an unwired evidence path, and
+- `empty_or_unfilled` may indicate a MISSING PARITY CASE rather than dead code.
+
+**Neither is closed here.** Both are recorded, which is the honest outcome of a sweep whose purpose was
+to test a claim rather than to produce a deliverable.
+
+===========================================================================
+7. Limitations
+===========================================================================
+1. **The sweep is name-based**, so anything reached via `getattr`, a registry string, a decorator or an
+   entry point reads as dead. `main` and `build_parser` were already skipped for that reason, and there
+   may be others.
+2. **It says nothing about methods.** `add_fact` and `facts_as_of` -- the finding that started this --
+   are METHODS, and this sweep cannot see them. The class-level version of the same check does not exist.
+3. `empty_or_unfilled` and `price_attribute_names` are listed with UNCERTAINTY rather than a reason,
+   which is weaker than the other six and is stated as such.
+4. The list of eight will rot as code moves, and only `test_the_list_does_not_rot` will notice.
+5. **`write_report` is flagged, not wired.** The evidence-persistence gap it represents is still open.
