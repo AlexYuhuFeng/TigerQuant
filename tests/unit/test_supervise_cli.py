@@ -43,6 +43,12 @@ def ns(journal_path: Path, **kwargs: object) -> argparse.Namespace:
         "retry_attempts": 8,
         "retry_max_seconds": 60.0,
         "heartbeat": None,
+        # Must mirror every flag `cmd_supervise` READS. A hand-built Namespace is a fixture, not the
+        # parser, so a new flag is invisible here -- `--hang-after` was added and these five tests
+        # failed in CI with AttributeError, which the tests for the flag itself could not catch
+        # because they go through the real parser. Kept beside the others so the next flag is an
+        # obvious addition rather than a CI failure.
+        "hang_after": 900.0,
         "no_alerts": True,
         "alert_log": None,
         "webhook": None,
