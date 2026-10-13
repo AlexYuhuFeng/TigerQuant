@@ -1,5 +1,7 @@
 """Tiger paper execution adapter: the four gates, and the failure modes around them.
 
+
+
 The adapter is the only broker write path in the system, so these tests are mostly about
 what it *refuses* to do. The live credential this repository holds is read-only, so the
 first gate is the one that actually fires today — and that is asserted, not assumed.
@@ -37,6 +39,13 @@ from tigerquant.core.enums import (
 from tigerquant.core.errors import BrokerError, ConfigurationError
 from tigerquant.execution.broker import BrokerOrderState
 from tigerquant.risk.approvals import OrderIntentView
+
+# This module reaches an optional SDK through the adapter it imports, so it needs that
+# extra installed. The fast lane syncs only `--extra dev` and DESELECTS it rather than
+# failing: the marker existed in pyproject all along and nothing wore it, so CI ran these
+# against an environment that deliberately lacks the dependency. Placed after the imports
+# so it neither lands inside the docstring nor trips E402.
+pytestmark = pytest.mark.requires_broker
 
 AT = dt.datetime(2026, 3, 2, 14, 40, tzinfo=dt.UTC)
 PAPER_ACCOUNT = "20240101120000042"

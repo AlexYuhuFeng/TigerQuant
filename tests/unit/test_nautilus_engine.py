@@ -28,6 +28,11 @@ from tigerquant.adapters.nautilus.execution_client import (
     status_for_broker_state,
 )
 
+# This module reaches an optional SDK through the adapter it imports, so it needs that
+# extra installed. The fast lane syncs only `--extra dev` and DESELECTS it rather than
+# failing: the marker existed in pyproject all along and nothing wore it, so CI ran these
+# against an environment that deliberately lacks the dependency. Placed after the imports
+# so it neither lands inside the docstring nor trips E402.
 pytestmark = pytest.mark.requires_engine
 
 requires_engine = pytest.mark.skipif(

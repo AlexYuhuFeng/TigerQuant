@@ -1,5 +1,7 @@
 """CR-04: strategy-loop parity between the direct path and the Nautilus adapter.
 
+
+
 Both paths end at the **same** broker, so any structural difference is a defect in the adapter
 rather than a venue characteristic. That is what makes this a parity test instead of a
 comparison of two unrelated things.
@@ -30,6 +32,13 @@ from tigerquant.adapters.nautilus.parity_corpus import (
 )
 from tigerquant.core.enums import Mode, SubmissionTarget
 from tigerquant.risk.state import RiskState
+
+# This module reaches an optional SDK through the adapter it imports, so it needs that
+# extra installed. The fast lane syncs only `--extra dev` and DESELECTS it rather than
+# failing: the marker existed in pyproject all along and nothing wore it, so CI ran these
+# against an environment that deliberately lacks the dependency. Placed after the imports
+# so it neither lands inside the docstring nor trips E402.
+pytestmark = pytest.mark.requires_engine
 
 requires_engine = pytest.mark.requires_engine
 

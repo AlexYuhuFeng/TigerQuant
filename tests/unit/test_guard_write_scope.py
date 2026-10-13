@@ -1,5 +1,7 @@
 """The account guard under a write-scoped credential — the tests that must pass BEFORE it exists.
 
+
+
 The situation these defend against was observed, not imagined. In CR-02 a single OAuth grant
 returned **both** a funded live-capable account and the paper account:
 
@@ -36,6 +38,13 @@ from tigerquant.core.clock import SimulatedClock
 from tigerquant.core.enums import OrderSide, OrderType, TimeInForce
 from tigerquant.core.errors import BrokerError, ConfigurationError
 from tigerquant.risk.approvals import OrderIntentView
+
+# This module reaches an optional SDK through the adapter it imports, so it needs that
+# extra installed. The fast lane syncs only `--extra dev` and DESELECTS it rather than
+# failing: the marker existed in pyproject all along and nothing wore it, so CI ran these
+# against an environment that deliberately lacks the dependency. Placed after the imports
+# so it neither lands inside the docstring nor trips E402.
+pytestmark = pytest.mark.requires_broker
 
 AT = dt.datetime(2026, 3, 2, 14, 40, tzinfo=dt.UTC)
 PAPER = "20240101120000042"

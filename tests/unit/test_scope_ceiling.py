@@ -1,5 +1,7 @@
 """The write-scope ceiling: default refusal, explicit opt-in, and the unexpected still refused.
 
+
+
 This is the control that decides whether a credential capable of trading can exist in this
 project at all, so it gets tested from both directions:
 
@@ -24,6 +26,13 @@ from tigerquant.adapters.tiger.oauth import (
     TigerQuantOAuthSession,
 )
 from tigerquant.core.errors import ConfigurationError
+
+# This module reaches an optional SDK through the adapter it imports, so it needs that
+# extra installed. The fast lane syncs only `--extra dev` and DESELECTS it rather than
+# failing: the marker existed in pyproject all along and nothing wore it, so CI ran these
+# against an environment that deliberately lacks the dependency. Placed after the imports
+# so it neither lands inside the docstring nor trips E402.
+pytestmark = pytest.mark.requires_broker
 
 READ_SET = set(READ_ONLY_SCOPES.split())
 WRITE_SET = {WRITE_SCOPE}

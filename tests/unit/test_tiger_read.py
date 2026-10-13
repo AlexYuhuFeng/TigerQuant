@@ -1,5 +1,7 @@
 """Read-only Tiger client and broker/ledger reconciliation.
 
+
+
 The fixture shapes are the ones the live paper account actually returned on 2026-10-10,
 including the detail that cost the most to find: **Tiger's paper environment returns ``inf``
 for figures it does not compute.** ``get_assets()`` reported ``cash = 1000000.0`` alongside
@@ -28,6 +30,13 @@ from tigerquant.adapters.tiger.read import (
 from tigerquant.core.enums import OrderSide, OrderStatus, ReasonCode
 from tigerquant.core.errors import BrokerError
 from tigerquant.portfolio.ledger import PortfolioLedger
+
+# This module reaches an optional SDK through the adapter it imports, so it needs that
+# extra installed. The fast lane syncs only `--extra dev` and DESELECTS it rather than
+# failing: the marker existed in pyproject all along and nothing wore it, so CI ran these
+# against an environment that deliberately lacks the dependency. Placed after the imports
+# so it neither lands inside the docstring nor trips E402.
+pytestmark = pytest.mark.requires_broker
 
 AT = dt.datetime(2026, 3, 2, 14, 40, tzinfo=dt.UTC)
 PAPER_ACCOUNT = "20240101120000042"
