@@ -1,0 +1,112 @@
+TigerQuant - 105 safety-critical tests ran in NO CI lane
+Generated: see the git commit this file was added in
+
+===========================================================================
+1. The gap
+===========================================================================
+CI's extras job installs EVERY optional extra and then selected:
+
+    uv run --frozen --no-sync pytest -q -m "requires_engine or requires_llm" \
+      || test $? -eq 5   # exit code 5 == "no tests collected yet" (CR-04/CR-06 add them)
+
+Measured locally:
+
+    requires_broker                            -> 105 tests
+    requires_engine                            ->  31 tests
+    requires_llm                               ->   0 tests
+    requires_engine or requires_llm            ->  31 tests
+    requires_broker or requires_engine or ...  -> 136 tests
+
+**105 tests were run by nothing in CI.** And they are the ones that matter most:
+`test_guard_write_scope.py` and `test_tiger_execution.py` cover `TigerAccountGuard` -- **the only
+thing keeping this project paper-only**, because the CR-02 OAuth grant returns a live-capable
+STANDARD account alongside the paper account.
+
+**The guard that prevents live trading had never been verified by CI**, while the repository's own
+documents described it as covered by tests.
+
+===========================================================================
+2. The escape hatch that hid it
+===========================================================================
+`|| test $? -eq 5` makes the step PASS when pytest collects nothing.
+
+It was honest when written: CR-04 and CR-06 had no tests then, and a red step for an empty selection
+would have been noise. But the tests exist now, so the hatch did exactly one thing: **a regression
+that made the markers stop matching would pass silently.**
+
+**A check that passes when it checks nothing is the shape this project has spent several rounds
+finding.** It is removed, because 136 > 0 was measured rather than assumed.
+
+===========================================================================
+3. The fix
+===========================================================================
+    -m "requires_broker or requires_engine or requires_llm"
+
+Verified locally: **136 passed**, including all 105 broker tests.
+
+===========================================================================
+4. A durable check, and the TWO ways my first version of it was vacuous
+===========================================================================
+`tests/unit/test_ci_lane_coverage.py` asserts that every declared marker is SELECTED by some lane.
+
+**FIRST FALSE PASS -- it grepped prose.** The check searched the concatenated `run:` bodies for the
+marker NAME and matched `requires_broker` inside the COMMENT I had just written explaining that
+`requires_broker` was missing. Proved by reverting the workflow to the broken selection: **8 passed.**
+A check that greps prose is not a check.
+
+**SECOND FALSE PASS -- it counted a DESELECTION as a selection.** After fixing the parser to read
+`-m` expressions, the check still passed against the broken workflow: the fast lane excludes with
+`not requires_db and not requires_broker and ...`, and a naive token scan found `requires_broker`
+there. Proved the same way: **14 passed against a workflow with the fix removed.**
+
+The parser now handles negation explicitly -- a marker directly preceded by `not` is excluded -- and
+a test asserts the parser itself works, because a broken parser makes every check below it vacuous.
+Verified on three cases including mixed negation.
+
+**THE PROOF IS THE POINT.** Both false passes were found by reverting the fix and demanding the check
+fail. Reading either version would have shown something that looked correct.
+
+    broken workflow  ->  3 failed, 11 passed   (caught)
+    fixed workflow   -> 14 passed
+
+===========================================================================
+5. Test results
+===========================================================================
+$ python -m pytest tests -q -m "requires_broker or requires_engine or requires_llm"
+136 passed, 1068 deselected
+
+$ python -m pytest tests/unit/test_ci_lane_coverage.py -q
+14 passed
+
+$ python -m tigerquant gates
+documented count [OK] pytest -q: claims 1204, actual 1204
+documented count [OK] pytest -q -m "not requires_db": claims 1184, actual 1184
+documented count [OK] pytest -q -m requires_db: claims 20, actual 20
+exit 0
+
+$ python -m ruff check src tests tools   -> All checks passed!
+$ python -m mypy                         -> Success. No issues found in 102 source files
+
+The count check caught this round's own staleness again -- adding 17 tests made the documented
+numbers wrong, and `gates` said so before the suite went green.
+
+===========================================================================
+6. Limitations
+===========================================================================
+1. **`requires_llm` selects ZERO tests.** It is declared and now "selected", but nothing wears it, so
+   the check that every marker is selected is satisfied by an empty set. CR-06 is blocked on an API
+   key, so this is expected -- but the check cannot tell "selected and populated" from "selected and
+   empty".
+2. The extras lane runs on **ubuntu-latest only**. The 105 broker tests, and the guard among them,
+   are verified on one platform.
+3. The new check reads the workflow as DATA. A selection built by string interpolation, a matrix
+   variable, or a script would not be seen, and the check would report the marker missing rather
+   than mis-parsing it. Failing loudly in that direction is the safer error, but it is still an
+   error.
+4. **Local verification remains partial.** The DSH file policy is `workspace-write` and 15
+   alert-wiring tests write to the OS temp dir, which is denied. Local runs show ~20 failures that CI
+   does not. The counts documented above are therefore from a run whose failures are all sandbox
+   artefacts -- true of CI, and not independently confirmed here.
+5. `requires_db` still runs in no CI lane. It is DESELECTED in the fast lane and nothing starts a
+   PostgreSQL service, so 20 tests are covered only locally. That is recorded as a limitation rather
+   than presented as coverage.

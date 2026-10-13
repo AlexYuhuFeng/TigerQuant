@@ -1457,6 +1457,50 @@ implied one is narrower than it sounds.
 lesson. The new test compares DECLARATIONS; it cannot prove CI is green. The verification is the CI
 run this commit triggers.
 
+### 2026-10-13 - 105 safety-critical tests were running in NO CI lane
+
+Full evidence: `docs/evidence/ci_broker_lane_gap.txt`. 14 tests.
+
+**The gap.** The extras job installs EVERY optional extra and then selected:
+
+    -m "requires_engine or requires_llm" \
+      || test $? -eq 5   # exit code 5 == "no tests collected yet" (CR-04/CR-06 add them)
+
+Measured: `requires_broker` -> **105 tests**, `requires_engine` -> 31, `requires_llm` -> 0.
+**105 tests were run by nothing in CI**, and they are the ones that matter most:
+`test_guard_write_scope.py` and `test_tiger_execution.py` cover `TigerAccountGuard` -- **the only
+thing keeping this project paper-only**, because the CR-02 OAuth grant returns a live-capable
+STANDARD account alongside the paper account.
+
+**The guard that prevents live trading had never been verified by CI**, while the repository's
+documents described it as covered by tests.
+
+**The escape hatch hid it.** `|| test $? -eq 5` makes the step PASS when pytest collects nothing. It
+was honest when written -- CR-04/CR-06 had no tests then -- and became a way for a regression that
+broke the markers to pass silently. Removed, because 136 > 0 was measured rather than assumed.
+
+**The fix**: `-m "requires_broker or requires_engine or requires_llm"` -> **136 passed** locally.
+
+**A durable check, and it was VACUOUS TWICE.** `test_ci_lane_coverage.py` asserts every declared
+marker is selected by some lane. Both false passes were found by REVERTING the fix and demanding the
+check fail:
+
+1. **It grepped prose.** It searched run bodies for the marker NAME and matched `requires_broker`
+   inside the comment I had just written explaining that `requires_broker` was missing. **8 passed**
+   against a broken workflow.
+2. **It counted a DESELECTION as a selection.** After parsing `-m` expressions, it still passed: the
+   fast lane excludes with `not requires_broker`, and a naive token scan found it there. **14 passed**
+   against a workflow with the fix removed.
+
+The parser now handles negation explicitly, and a test asserts the parser itself works -- because a
+broken parser makes every check below it vacuous. **Reading either version would have shown something
+that looked correct.**
+
+**Named limitations:** `requires_llm` selects ZERO tests, so the check cannot tell "selected and
+populated" from "selected and empty". The extras lane is ubuntu-latest only. And `requires_db` still
+runs in no CI lane -- deselected in the fast lane, with nothing starting a PostgreSQL service, so 20
+tests are covered only locally.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.

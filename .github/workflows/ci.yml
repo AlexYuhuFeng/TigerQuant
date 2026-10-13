@@ -110,9 +110,20 @@ jobs:
           PY
 
       - name: Tests that need an optional extra
+        # requires_broker WAS MISSING HERE, and the extras job installs the broker extra and then
+        # selected only engine and llm. Measured: 105 broker tests, 31 engine, 0 llm. **105 tests
+        # ran in no CI lane at all**, and they are the safety-critical ones: test_guard_write_scope
+        # and test_tiger_execution cover TigerAccountGuard, the only thing keeping this project
+        # paper-only, because the CR-02 OAuth grant returns a live-capable STANDARD account
+        # alongside the paper one.
+        #
+        # THE `|| test $? -eq 5` ESCAPE HATCH IS GONE. It made the step PASS when pytest collected
+        # nothing, which was honest when CR-04/CR-06 had no tests and became a way to hide their
+        # disappearance. 136 tests are selected now -- verified, not assumed -- so a zero
+        # collection means the markers stopped matching, which must fail.
         run: |
-          uv run --frozen --no-sync pytest -q -m "requires_engine or requires_llm" \
-            || test $? -eq 5   # exit code 5 == "no tests collected yet" (CR-04/CR-06 add them)
+          uv run --frozen --no-sync pytest -q \
+            -m "requires_broker or requires_engine or requires_llm"
 
   security:
     name: dependency audit and secret scan
