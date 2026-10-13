@@ -35,6 +35,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from tigerquant.core.clock import ensure_utc
 from tigerquant.core.enums import ReasonCode
 from tigerquant.core.errors import ConfigurationError, EvidenceError
+from tigerquant.events.emitter import EventEmitter
+from tigerquant.events.evidence import EvidenceFactRecorded
 from tigerquant.evidence.facts import Fact, FactKind, fact_id_for
 from tigerquant.evidence.sources import SourceKind
 from tigerquant.evidence.text import sanitise, scan_for_injection
@@ -209,7 +211,7 @@ class IngestionPipeline:
     caveat.
     """
 
-    __slots__ = ("_clock", "_indexed", "_latest", "_registry", "_staleness", "_store")
+    __slots__ = ("_clock", "_emitter", "_indexed", "_latest", "_registry", "_staleness", "_store")
 
     def __init__(
         self,
@@ -218,11 +220,13 @@ class IngestionPipeline:
         store: DurableFactStore,
         clock: Clock,
         staleness: StalenessPolicy,
+        emitter: EventEmitter | None = None,
     ) -> None:
         self._registry = registry
         self._store = store
         self._clock = clock
         self._staleness = staleness
+        self._emitter = emitter
         #: (source_id, external_id) -> the newest fact id for that document.
         #:
         #: Built lazily from the store rather than held in memory only, so a pipeline started
@@ -272,6 +276,10 @@ class IngestionPipeline:
 
             if self._store.add(fact):
                 admitted += 1
+                # PROJECTED ONLY WHEN NEWLY STORED. A duplicate is already in the database, and
+                # re-emitting would put a second journal entry against a fact that did not change.
+                if self._emitter is not None:
+                    self._emitter.emit(EvidenceFactRecorded, fact=fact.model_dump(mode="json"))
                 if previous is not None:
                     revisions += 1
             else:

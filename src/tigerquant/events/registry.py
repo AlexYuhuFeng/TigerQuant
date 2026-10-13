@@ -16,6 +16,7 @@ from pydantic import Field, TypeAdapter
 from tigerquant.core.errors import CanonicalizationError
 from tigerquant.events.base import EventBase
 from tigerquant.events.decision import DecisionProposed, DecisionRejected, SnapshotCreated
+from tigerquant.events.evidence import EvidenceFactRecorded
 from tigerquant.events.execution import (
     OrderAcknowledged,
     OrderCanceled,
@@ -55,6 +56,7 @@ EVENT_MODELS: tuple[type[EventBase], ...] = (
     OrderQuarantined,
     PositionChanged,
     LedgerMarked,
+    EvidenceFactRecorded,
 )
 
 #: type name -> model

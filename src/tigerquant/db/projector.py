@@ -55,6 +55,9 @@ __all__ = [
 ]
 
 #: Events that carry an execution, and therefore a fill row.
+#: Events carrying an admitted evidence fact.
+_EVIDENCE_EVENTS = frozenset({"EvidenceFactRecorded"})
+
 _FILL_EVENTS = frozenset({"OrderFilled", "OrderPartiallyFilled"})
 
 #: Event types that can change an order's folded state.
@@ -96,6 +99,7 @@ class _Counts:
     fills: int = 0
     positions: int = 0
     decisions: int = 0
+    evidence_facts: int = 0
     risk_outcomes: int = 0
     alerts: int = 0
 
@@ -329,6 +333,17 @@ def _project_one(
     """
     kind = type(event).__name__
     sequence = event.seq
+
+    if kind in _EVIDENCE_EVENTS:
+        # REBUILT FROM THE MODEL, not unpacked field by field. The event carries the Fact's own JSON
+        # precisely so this cannot drift from the fifteen-column insert.
+        raw = _payload(event).get("fact")
+        if isinstance(raw, dict):
+            from tigerquant.evidence.facts import Fact
+
+            if repository.add_fact(Fact.model_validate(raw)):
+                counts.evidence_facts += 1
+        return
 
     if kind in _ORDER_EVENTS:
         # The fold runs unconditionally: a later event in this same pass needs the prior

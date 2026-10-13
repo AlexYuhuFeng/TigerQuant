@@ -38,6 +38,7 @@ __all__ = [
     "DecisionRejected",
     "EventBase",
     "EventEmitter",
+    "EvidenceFactRecorded",
     "JournalRecord",
     "JournalVerification",
     "LedgerMarked",
