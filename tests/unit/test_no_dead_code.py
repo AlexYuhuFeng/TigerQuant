@@ -64,12 +64,6 @@ KNOWN_DEAD: dict[str, str] = {
         "not check for unfilled orders may be missing a case, so it is worth a look rather than a "
         "deletion."
     ),
-    "write_report": (
-        "pipeline/long_run.py -- **A FUNCTION WHOSE DOCSTRING SAYS 'Persist a stability report as "
-        "evidence' AND WHICH NOTHING CALLS.** The same shape as evidence_facts: the evidence-persistence "
-        "path exists and is not wired. The CR-09 long-run evidence was produced some other way, and "
-        "this is flagged rather than quietly listed."
-    ),
 }
 
 SKIP = frozenset({"main", "build_parser"})
@@ -84,9 +78,13 @@ def _dead_definitions() -> dict[str, str]:
     # would make each of them "referenced in tests" and the sweep would report NOTHING dead -- a
     # measurement that changes what it measures. Found by the per-name tests failing while the
     # standalone sweep passed.
+    # 	ools/ COUNTS AS USAGE. The first version scanned only src/ and tests/, so write_report --
+    # called by 	ools/long_run_evidence.py -- was still reported as dead after it was wired up.
+    # A sweep that misses a whole top-level package reports real usage as absent.
     test_text = "\n".join(
         path.read_text(encoding="utf-8", errors="replace")
-        for path in TESTS.rglob("*.py")
+        for root in (TESTS, ROOT / "tools")
+        for path in root.rglob("*.py")
         if path.name != "test_no_dead_code.py"
     )
     found: dict[str, str] = {}
@@ -148,8 +146,22 @@ class TestNoNewDeadCode:
         """Per-name, so a failure says WHICH entry rotted rather than only that the set changed."""
         assert name in _dead_definitions(), f"{name} is no longer dead"
 
-    def test_write_report_is_named_as_the_evidence_persistence_gap(self) -> None:
-        """Singled out because it is the most consequential of the eight: a function whose docstring
-        says it persists evidence as evidence, called by nothing."""
-        assert "write_report" in KNOWN_DEAD
-        assert "evidence" in KNOWN_DEAD["write_report"].lower()
+    def test_the_evidence_persistence_gap_is_closed(self) -> None:
+        """`write_report` was the most consequential entry: a function whose docstring says it persists
+        a stability report as evidence, called by nothing, so CR-09's long-run evidence was NOT
+        REPRODUCIBLE from the repository.
+
+        `tools/long_run_evidence.py` now calls it, and running that tool reproduces the documented
+        figures -- 5 sessions, 32.50 hours of simulated span, 8632 events, STABLE.
+
+        **Asserted from the CALL SITE rather than from the list**, so this fails if the wiring is ever
+        removed, which a list entry could not detect.
+        """
+        tool = ROOT / "tools" / "long_run_evidence.py"
+        assert tool.is_file(), "the tool that produces the long-run evidence is gone"
+        source = tool.read_text(encoding="utf-8")
+        assert "run_long_sessions" in source, "the tool no longer runs a long session"
+        assert "write_report" in source, "the tool no longer persists the report"
+        assert "write_report" not in KNOWN_DEAD, (
+            "write_report is listed as dead while being called; the list has outlived its subject"
+        )

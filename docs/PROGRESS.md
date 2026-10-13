@@ -1654,6 +1654,34 @@ slow enough to notice is a check somebody deletes.**
 **And the orphan check written last round caught this very file** in CI, because the evidence was written
 before it was cited -- which is precisely what it exists to detect.
 
+### 2026-10-13 - CR-09's long-run evidence is now reproducible from the repository
+
+**THE FINDING BEHIND LAST ROUND'S DEAD-CODE ENTRY.** The sweep flagged `write_report` -- docstring
+*"Persist a stability report as evidence"*, called by nothing. Looking further: **`run_long_sessions`
+was called by nothing either.** The whole long-run apparatus was exercised only by its tests.
+
+**So CR-09's long-run evidence was NOT REPRODUCIBLE.** The apparatus existed, the report type existed,
+the function that persists it existed, and no command ran them. Regenerating `cr09_long_run.txt` meant
+knowing how to call two functions nothing exposed.
+
+`tools/long_run_evidence.py` closes it, and **running it reproduces the documented figures exactly**:
+
+    5 sessions x 390 bars
+    simulated span    32.50 hours     <- CR-09 documents "32.5h of market time"
+    events            8632           <- CR-09 documents "8632 events"
+    verdict           STABLE
+    risk denials      275
+
+**A TOOL RATHER THAN A FIXTURE**, because it produces EVIDENCE rather than asserting a property: it
+belongs beside `tools/db_migrate.py`, run deliberately and recorded, not on every commit.
+
+**And it had to be made to work INSIDE this sandbox.** The first run failed writing its fixture to a
+temporary directory, which the DSH policy denies -- so the tool now takes a workdir in the workspace.
+**A tool that only works outside the environment it is run in is not evidence.**
+
+The dead-code list loses its `write_report` entry, and the closure is asserted **from the call site**
+rather than from the list, so removing the wiring fails the test. A list entry could not detect that.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
