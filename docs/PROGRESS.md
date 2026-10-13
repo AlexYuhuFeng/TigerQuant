@@ -1623,6 +1623,37 @@ evidence too -- of what was tried and why it stopped.
 - `docs/evidence/gate_counts_attempt_reverted.txt`
 - `docs/evidence/ops_shutdown_push_incident.txt`
 
+### 2026-10-13 - A sweep for dead code, testing the claim that offline work was exhausted
+
+Full evidence: \docs/evidence/dead_code_sweep.txt\.
+
+**A claim nothing verifies is the failure this session has been about**, so last round's "offline work
+is close to exhausted" was tested rather than asserted. The sweep is the systematic version of a pattern
+found FOUR TIMES BY ACCIDENT: \evidence_facts\, \KNOWN_CATEGORIES\, the pipeline's category mapping, and
+\dd_fact\/\acts_as_of\ -- each a thing that LOOKED wired and was not.
+
+    400 public definitions scanned
+     43 referenced NOWHERE   <- NOISE: mostly return-type dataclasses
+      8 TRULY DEAD
+
+**The 43 was noise and saying so matters.** \IngestionReport\ is the return type of \ingest()\ and lives
+inside \connectors.py\, so a cross-file count calls it unused when it is central. **A finding-shaped
+number attached to nothing is worse than no sweep.**
+
+**Two of the eight are not housekeeping.** \write_report\ in \pipeline/long_run.py\ has the docstring
+*"Persist a stability report as evidence"* and **NOTHING CALLS IT** -- the same shape as
+\evidence_facts\. \empty_or_unfilled\ in \execution/parity.py\ may indicate a MISSING PARITY CASE rather
+than dead code. **Neither is closed; both are recorded.**
+
+**The measurement changed what it measured.** The test names every entry in \KNOWN_DEAD\, so counting
+itself made each "referenced in tests" and the sweep reported nothing dead -- nine tests failed while
+the standalone script passed. **An observer that changes the observed is indistinguishable from a
+working check that finds nothing.** It also took 120s; \lru_cache\ brought it to 11s, because **a check
+slow enough to notice is a check somebody deletes.**
+
+**And the orphan check written last round caught this very file** in CI, because the evidence was written
+before it was cited -- which is precisely what it exists to detect.
+
 ### 2026-10-10 — CR-05: Market Truth Engine and containerised PostgreSQL
 
 Full evidence: `docs/evidence/cr05_database.txt`; decision record `docs/adr/ADR-0013`.
